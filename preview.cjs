@@ -1,0 +1,2 @@
+const http=require('node:http'),fs=require('node:fs'),path=require('node:path');
+http.createServer((req,res)=>{const name=new URL(req.url,'http://localhost').pathname;const files={'/':'index.html','/app.js':'app.js','/style.css':'style.css'};if(!files[name]){res.writeHead(404);return res.end();}res.setHeader('Content-Type',name.endsWith('.js')?'text/javascript':name.endsWith('.css')?'text/css':'text/html');res.end(fs.readFileSync(path.join(__dirname,'dist',files[name])));}).listen(4173,'127.0.0.1',()=>console.log('Local: http://127.0.0.1:4173'));
