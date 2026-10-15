@@ -27,7 +27,7 @@ async function runCheck(db,source){
     throw error;
   }
 }
-async function route(request,env){const url=new URL(request.url),path=url.pathname;if(!path.startsWith('/api/')){const asset=ASSETS[path];if(!asset)return new Response('Not found',{status:404});return new Response(asset.body,{headers:{'Content-Type':asset.type,'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'}});}if(!env.DB)return json({error:'Monitor storage is not configured'},503);
+async function route(request,env){const url=new URL(request.url),path=url.pathname;if(!path.startsWith('/api/')){const asset=ASSETS[path];if(!asset)return new Response('Not found',{status:404});return new Response(asset.body,{headers:{'Content-Type':asset.type,'Cache-Control':'no-cache','X-Content-Type-Options':'nosniff'}});}if(path==='/api/news')return fetchNews(request);if(!env.DB)return json({error:'Monitor storage is not configured'},503);
 if(request.method==='GET'&&path==='/api/state')return json(publicState((await load(env.DB)).data));
 if(request.method!=='POST')return json({error:'Method not allowed'},405);
 if(!validOrigin(request))return json({error:'Same-origin request required'},403);
