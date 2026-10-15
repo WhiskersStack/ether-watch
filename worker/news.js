@@ -6,7 +6,7 @@ export const NEWS_SOURCES = Object.freeze([
   {id:'fed',name:'Federal Reserve',url:'https://www.federalreserve.gov/feeds/press_monetary.xml',domains:['federalreserve.gov','www.federalreserve.gov'],kind:'macro'}
 ]);
 const newsFreshMs=5*60*1000,newsStaleMs=24*60*60*1000,newsArticleAgeMs=30*24*60*60*1000;
-const newsMaxBytes=2*1024*1024,newsLimit=16;
+const newsMaxBytes=2*1024*1024,newsSourceLimit=32,newsLimit=newsSourceLimit*NEWS_SOURCES.length;
 const newsEntities={amp:'&',lt:'<',gt:'>',quot:'"',apos:"'",nbsp:' ',rsquo:'’',lsquo:'‘',rdquo:'”',ldquo:'“',ndash:'–',mdash:'—',hellip:'…'};
 
 export function newsDecode(value){
@@ -55,17 +55,25 @@ export function newsRelevance(title,description,source){
   const text=(title+' '+description).toLowerCase();
   const eth=/\b(?:ethereum|ether|eth)\b|\beip[-\s]?\d+\b/.test(text);
   const crypto=/\b(?:bitcoin|btc|crypto(?:currency|currencies)?|digital assets?|stablecoins?)\b/.test(text);
-  const macro=/\b(?:federal reserve|fed|fomc|interest rates?|rate cuts?|rate hikes?|inflation|cpi|pce|treasury yields?)\b/.test(text);
-  if(source.kind==='macro'||macro)return {category:'Macro',context:'Interest rates and liquidity can influence demand for risk assets, including ETH.'};
-  if(source.kind==='network')return {category:'Network',context:'Ethereum network changes may affect transaction costs, validator participation and ETH demand.'};
-  if(!eth&&!crypto)return null;
-  if(/\b(?:etfs?|exchange[- ]traded funds?)\b/.test(text))return {category:'ETF & flows',context:'Fund flows may change crypto demand and liquidity; the effect on ETH depends on the assets involved.'};
-  if(/\b(?:sec|securities|regulat\w*|legislation|lawsuits?|enforcement|ban|bans)\b/.test(text))return {category:'Regulation',context:'Policy and enforcement changes may affect crypto access, participation and market confidence.'};
-  if(/\b(?:hack\w*|exploit\w*|breach\w*|vulnerabilit\w*|security|attack\w*)\b/.test(text))return {category:'Security',context:'Security incidents can affect confidence and liquidity; any spillover to ETH may be indirect.'};
-  if(eth&&/\b(?:upgrade\w*|network|validators?|staking|staked|rollups?|layer[- ]?2|gas|fees?|blobs?)\b/.test(text))return {category:'Network',context:'Network usage and changes may affect transaction costs, validator participation and ETH demand.'};
-  if(eth)return {category:'Ethereum',context:'This report concerns ETH or its ecosystem; the headline alone does not establish a price effect.'};
-  if(/\b(?:markets?|sell[- ]?off|rally|rallies|liquidat\w*|exchanges?|inflows?|outflows?|trading volume)\b/.test(text))return {category:'Ethereum',context:'Broad crypto positioning and liquidity may spill over into ETH; any effect is uncertain.'};
-  return null;
+  const macro=source.kind==='macro'||/\b(?:federal reserve|fed|fomc|interest rates?|rate cuts?|rate hikes?|inflation|cpi|pce|treasury yields?)\b/.test(text);
+  const ecosystem=eth||crypto||source.kind==='network';
+  const network=source.kind==='network'||eth&&/\b(?:upgrade\w*|network|validators?|staking|staked|rollups?|layer[- ]?2|gas|fees?|blobs?)\b/.test(text);
+  const etf=ecosystem&&/\b(?:etfs?|exchange[- ]traded funds?)\b/.test(text);
+  const regulation=ecosystem&&/\b(?:sec|securities|regulat\w*|legislation|lawsuits?|enforcement|ban|bans)\b/.test(text);
+  const security=ecosystem&&/\b(?:hack\w*|exploit\w*|breach\w*|vulnerabilit\w*|security|attack\w*)\b/.test(text);
+  const market=crypto&&/\b(?:markets?|sell[- ]?off|rally|rallies|liquidat\w*|exchanges?|inflows?|outflows?|trading volume)\b/.test(text);
+  const ethereum=ecosystem;
+  const topics=Object.entries({ethereum,macro,network,etf,regulation,security}).filter(([,matches])=>matches).map(([topic])=>topic);
+  let relevance;
+  if(macro)relevance={category:'Macro',context:'Interest rates and liquidity can influence demand for risk assets, including ETH.'};
+  else if(source.kind==='network')relevance={category:'Network',context:'Ethereum network changes may affect transaction costs, validator participation and ETH demand.'};
+  else if(etf)relevance={category:'ETF & flows',context:'Fund flows may change crypto demand and liquidity; the effect on ETH depends on the assets involved.'};
+  else if(regulation)relevance={category:'Regulation',context:'Policy and enforcement changes may affect crypto access, participation and market confidence.'};
+  else if(security)relevance={category:'Security',context:'Security incidents can affect confidence and liquidity; any spillover to ETH may be indirect.'};
+  else if(network)relevance={category:'Network',context:'Network usage and changes may affect transaction costs, validator participation and ETH demand.'};
+  else if(eth)relevance={category:'Ethereum',context:'This report concerns ETH or its ecosystem; the headline alone does not establish a price effect.'};
+  else if(market)relevance={category:'Ethereum',context:'Broad crypto positioning and liquidity may spill over into ETH; any effect is uncertain.'};
+  return relevance?{...relevance,topics}:null;
 }
 export function newsNormalize(items,now=Date.now(),limit=newsLimit){
   const urls=new Set(),titles=new Set();
@@ -73,7 +81,7 @@ export function newsNormalize(items,now=Date.now(),limit=newsLimit){
     .sort((a,b)=>newsDate(b.publishedAt)-newsDate(a.publishedAt))
     .filter(item=>{const key=item.title.toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim();if(urls.has(item.url)||titles.has(key))return false;urls.add(item.url);titles.add(key);return true;}).slice(0,limit);
 }
-export function parseNewsFeed(xml,source,now=Date.now()){
+function newsParseFeedResult(xml,source,now){
   if(typeof xml!=='string'||xml.length>newsMaxBytes)throw new Error('Feed is too large');
   const clean=xml.replace(/^\uFEFF/,'').replace(/<!--[\s\S]*?-->/g,'');
   const root=clean.match(/<(?:[\w-]+:)?(rss|feed|RDF)\b/i);
@@ -87,8 +95,10 @@ export function parseNewsFeed(xml,source,now=Date.now()){
     const relevance=newsRelevance(title,description,source);
     if(relevance)items.push({id:url,title,url,source:source.name,sourceId:source.id,publishedAt:new Date(date).toISOString(),...relevance});
   }
-  return newsNormalize(items,now,newsLimit);
+  const candidates=newsNormalize(items,now,newsSourceLimit+1);
+  return {items:candidates.slice(0,newsSourceLimit),truncated:candidates.length>newsSourceLimit};
 }
+export function parseNewsFeed(xml,source,now=Date.now()){return newsParseFeedResult(xml,source,now).items;}
 async function newsReadBody(response){
   if(Number(response.headers.get('Content-Length'))>newsMaxBytes)throw new Error('Feed is too large');
   if(!response.body){const text=await response.text();if(text.length>newsMaxBytes)throw new Error('Feed is too large');return text;}
@@ -97,21 +107,21 @@ async function newsReadBody(response){
 }
 function newsFailure(error){return error?.name==='TimeoutError'||error?.name==='AbortError'?'Feed request timed out':/^(HTTP \d{3}|Feed is too large|Invalid RSS or Atom feed|Unexpected feed redirect)$/.test(error?.message??'')?error.message:'Feed request failed';}
 async function newsLoadSource(source,request,now){
-  const cache=globalThis.caches?.default,key=new Request(new URL('/__ether-watch-news/v1/'+source.id,request.url).href);
+  const cache=globalThis.caches?.default,key=new Request(new URL('/__ether-watch-news/v2/'+source.id,request.url).href);
   let previous=null;
   if(cache){try{const stored=await cache.match(key);if(stored){const data=await stored.json(),time=Date.parse(data.fetchedAt);if(Array.isArray(data.items)&&Number.isFinite(time)&&time<=now&&now-time<=newsStaleMs)previous=data;}}catch{/* A cache miss must not block live sources. */}}
   const metadata={id:source.id,name:source.name,url:source.url};
-  if(previous&&now-Date.parse(previous.fetchedAt)<newsFreshMs)return {items:newsNormalize(previous.items,now),source:{...metadata,status:'ok',fetchedAt:previous.fetchedAt,lastAttemptAt:previous.fetchedAt,error:null,itemCount:previous.items.length}};
+  if(previous&&now-Date.parse(previous.fetchedAt)<newsFreshMs){const items=newsNormalize(previous.items,now,newsSourceLimit);return {items,source:{...metadata,status:'ok',fetchedAt:previous.fetchedAt,lastAttemptAt:previous.fetchedAt,error:null,itemCount:items.length,truncated:previous.truncated===true}};}
   try{
     const response=await fetch(source.url,{signal:AbortSignal.timeout(8000),headers:{Accept:'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9'}});
     if(!response.ok)throw new Error('HTTP '+response.status);
     if(response.url&&!source.domains.includes(new URL(response.url).hostname))throw new Error('Unexpected feed redirect');
-    const items=parseNewsFeed(await newsReadBody(response),source,now),fetchedAt=new Date(now).toISOString();
-    if(cache){try{await cache.put(key,Response.json({items,fetchedAt},{headers:{'Cache-Control':'public,max-age=86400'}}));}catch{/* A cache write failure does not invalidate fresh headlines. */}}
-    return {items,source:{...metadata,status:'ok',fetchedAt,lastAttemptAt:fetchedAt,error:null,itemCount:items.length}};
+    const {items,truncated}=newsParseFeedResult(await newsReadBody(response),source,now),fetchedAt=new Date(now).toISOString();
+    if(cache){try{await cache.put(key,Response.json({items,fetchedAt,truncated},{headers:{'Cache-Control':'public,max-age=86400'}}));}catch{/* A cache write failure does not invalidate fresh headlines. */}}
+    return {items,source:{...metadata,status:'ok',fetchedAt,lastAttemptAt:fetchedAt,error:null,itemCount:items.length,truncated}};
   }catch(error){
-    const items=previous?newsNormalize(previous.items,now):[];
-    return {items,source:{...metadata,status:previous?'stale':'error',fetchedAt:previous?.fetchedAt??null,lastAttemptAt:new Date(now).toISOString(),error:newsFailure(error),itemCount:items.length}};
+    const items=previous?newsNormalize(previous.items,now,newsSourceLimit):[];
+    return {items,source:{...metadata,status:previous?'stale':'error',fetchedAt:previous?.fetchedAt??null,lastAttemptAt:new Date(now).toISOString(),error:newsFailure(error),itemCount:items.length,truncated:previous?.truncated===true}};
   }
 }
 export async function fetchNews(request){

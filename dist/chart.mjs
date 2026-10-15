@@ -390,8 +390,11 @@ export class PriceChart {
         ctx.fillRect(x(index) - Math.min(16, step * 0.6) / 2, volumeBottom - height, Math.max(1, Math.min(16, step * 0.6)), height);
       });
     }
-    const arranged = layoutAxisLabels(labels, top + 4, bottom - 3, 13);
-    for (const label of arranged) {
+    // Numeric ticks must stay on their gridlines; only annotations may move.
+    const labelGap = 13;
+    const annotations = layoutAxisLabels(labels.filter(label => label.kind !== 'tick'), top + 4, bottom - 3, labelGap);
+    const visibleTicks = labels.filter(label => label.kind === 'tick' && annotations.every(annotation => Math.abs(label.y - annotation.y) >= labelGap));
+    for (const label of [...visibleTicks, ...annotations]) {
       ctx.font = (label.kind === 'tick' ? '9' : '10') + 'px DM Sans, sans-serif';
       ctx.fillStyle = label.color;
       if (label.kind !== 'tick') {

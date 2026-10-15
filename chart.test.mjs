@@ -93,6 +93,43 @@ function fakeCanvas() {
 }
 const event = values => ({ preventDefault() {}, ...values });
 
+test('numeric axis ticks stay aligned with their gridlines without annotations', () => {
+  const { canvas, calls } = fakeCanvas(), chart = new PriceChart(canvas);
+  chart.setData(rows());
+  const geometry = chart.geometry;
+  const ticks = calls.filter(call => call.key === 'fillText' && call.args[1] === geometry.right + 8 && /^[\d,.]+$/.test(call.args[0]));
+  assert.equal(ticks.length, 5);
+  for (let index = 0; index < ticks.length; index++) {
+    const gridY = geometry.top + (geometry.bottom - geometry.top) * index / 4;
+    assert.equal(ticks[index].args[2], gridY + 3, 'tick baseline stays on its own gridline');
+    assert.equal(ticks[index].args[0], geometry.valueAtY(gridY).toLocaleString('en-US', { maximumFractionDigits: 0 }));
+  }
+});
+
+test('clustered annotations stay separated while crowded numeric ticks are omitted rather than moved', () => {
+  const { canvas, calls } = fakeCanvas(), chart = new PriceChart(canvas);
+  const levels = ['S3', 'S2', 'S1', 'R1', 'R2', 'R3'].map((code, index) => ({ code, price: 2546 + index }));
+  chart.setData(rows(), { levels, price: 2550.5 });
+  const geometry = chart.geometry;
+  const axis = calls.filter(call => call.key === 'fillText' && call.args[1] === geometry.right + 8);
+  const ticks = axis.filter(call => /^[\d,.]+$/.test(call.args[0]));
+  const annotations = axis.filter(call => /^(?:[SR]\d |\$)/.test(call.args[0]));
+  assert.equal(annotations.length, 7, 'all six watch levels and the current price remain labeled');
+  assert.ok(ticks.length > 0 && ticks.length < 5, 'unobstructed ticks remain visible while crowded ticks are omitted');
+  const annotationYs = annotations.map(call => call.args[2]).sort((a, b) => a - b);
+  for (let index = 1; index < annotationYs.length; index++) assert.ok(annotationYs[index] - annotationYs[index - 1] >= 13 - 1e-8);
+  const gridTicks = Array.from({ length: 5 }, (_, index) => {
+    const y = geometry.top + (geometry.bottom - geometry.top) * index / 4;
+    return { y, text: geometry.valueAtY(y).toLocaleString('en-US', { maximumFractionDigits: 0 }) };
+  });
+  for (const tick of ticks) {
+    const gridTick = gridTicks.find(candidate => candidate.text === tick.args[0]);
+    assert.ok(gridTick, 'tick value belongs to an actual gridline');
+    assert.equal(tick.args[2], gridTick.y + 3, 'collision handling never relocates a numeric tick');
+    for (const annotationY of annotationYs) assert.ok(Math.abs(tick.args[2] - annotationY) >= 13 - 1e-8);
+  }
+});
+
 test('renderer updates data, emits visible profile and clears stale geometry/tooltip on empty input', () => {
   const { canvas } = fakeCanvas(), tooltip = { hidden: true, style: {} }, profiles = [], errors = [];
   const chart = new PriceChart(canvas, { tooltip, onProfile: poc => profiles.push(poc), onError: error => errors.push(error) });
