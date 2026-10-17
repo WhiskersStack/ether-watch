@@ -2,15 +2,16 @@
 import { DEFAULT_CONFIG, validateConfig, acceptTicker } from './rules.mjs';
 import { PriceChart, DEFAULT_CHART_OPTIONS } from './chart.mjs';
 import { createCandleFeed } from './market-data.mjs';
+import { mountCalendar } from './calendar-ui.mjs';
 const $ = id => document.getElementById(id);
 const levelNames={R3:'Resistance 3',R2:'Resistance 2',R1:'Immediate resistance',S1:'Immediate support',S2:'Support 2',S3:'Support 3'};
 let config=structuredClone(DEFAULT_CONFIG),levels=[];
 let editingConfig=null,legacyPaused=false;
 let chartPrefs={...DEFAULT_CHART_OPTIONS,timeframe:86400,bars:90};
-try{const saved=JSON.parse(localStorage.getItem('etherwatch-chart')||'{}');for(const key of ['ema','volume','profile','levels','flips','rsi','macd'])if(typeof saved[key]==='boolean')chartPrefs[key]=saved[key];if(['candles','line'].includes(saved.type))chartPrefs.type=saved.type;if(['linear','log'].includes(saved.scale))chartPrefs.scale=saved.scale;if(['levels','candles'].includes(saved.fit))chartPrefs.fit=saved.fit;if([900,3600,86400].includes(saved.timeframe))chartPrefs.timeframe=saved.timeframe;if([30,90,180].includes(saved.bars))chartPrefs.bars=saved.bars;}catch{}
-const priceChart=new PriceChart($('chart'),{tooltip:$('tooltip'),onProfile:poc=>{$('poc').textContent=Number.isFinite(poc)?poc.toLocaleString('en-US',{style:'currency',currency:'USD',maximumFractionDigits:2}):'—';}});
+try{const saved=JSON.parse(localStorage.getItem('etherwatch-chart')||'{}');for(const key of ['ema','volume','profile','levels','flips','rsi','macd','news'])if(typeof saved[key]==='boolean')chartPrefs[key]=saved[key];if(['candles','line'].includes(saved.type))chartPrefs.type=saved.type;if(['linear','log'].includes(saved.scale))chartPrefs.scale=saved.scale;if(['levels','candles'].includes(saved.fit))chartPrefs.fit=saved.fit;if([900,3600,86400].includes(saved.timeframe))chartPrefs.timeframe=saved.timeframe;if([30,90,180].includes(saved.bars))chartPrefs.bars=saved.bars;}catch{}
+const priceChart=new PriceChart($('chart'),{tooltip:$('tooltip'),onProfile:poc=>{$('poc').textContent=Number.isFinite(poc)?poc.toLocaleString('en-US',{style:'currency',currency:'USD',maximumFractionDigits:2}):'—';},onEventSelect:group=>selectNewsGroup(group)});
 const graphState={candles:[],granularity:chartPrefs.timeframe,loadedAt:0,generation:0,busy:false};
-const newsState={data:null,busy:false,visible:6};
+const newsState={data:null,busy:false,visible:6,selected:null};
 const candleFeed=createCandleFeed({fetcher:(url,options)=>fetch(url,{...options,signal:AbortSignal.timeout(12000)})});
 const newsTopics={ethereum:'Ethereum & crypto',macro:'Macro',network:'Network upgrades',etf:'ETFs',regulation:'Regulation',security:'Security'};
 try{legacyPaused=localStorage.getItem('etherwatch-armed')==='false'&&!localStorage.getItem('etherwatch-migrated');}catch{}
@@ -77,16 +78,16 @@ async function refreshGraph(force=false){
 function filterNews(items,topic,source,query){const q=query.trim().toLocaleLowerCase();return items.filter(item=>{const topics=item.topics||[item.category==='Macro'?'macro':'ethereum'];return (topic==='all'||topics.includes(topic))&&(source==='all'||source===item.sourceId)&&(!q||[item.title,item.source,...topics.map(key=>newsTopics[key]||key)].join(' ').toLocaleLowerCase().includes(q));});}
 function newsRender(){
   const list=$('news-list');list.replaceChildren();let data=newsState.data;if(!data)return;
-  if(data.fetchedAt&&Date.now()-Date.parse(data.fetchedAt)>86400000)data=newsState.data=newsFallback(null,'Cached news expired');
+  data=newsState.data=retainNewsSources(data);
   const items=filterNews(data.items||[],$('news-filter').value,$('news-source').value,$('news-search').value);
   for(const item of items.slice(0,newsState.visible)){
     let url;try{url=new URL(item.url);if(url.protocol!=='https:')continue;}catch{continue;}
-    const card=document.createElement('article');card.className='news-card';card.dataset.newsId=item.id;
+    const card=document.createElement('article');card.className='news-card';card.dataset.newsId=item.id;card.classList.toggle('selected-news',item.id===newsState.selected);
     const meta=document.createElement('div');meta.className='news-meta';const byline=document.createElement('span');byline.textContent=item.source+((data.sources||[]).some(s=>s.id===item.sourceId&&s.status==='stale')?' · cached':'');
     const date=document.createElement('time');date.dateTime=item.publishedAt;date.textContent=new Date(item.publishedAt).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});meta.append(byline,date);
     const category=document.createElement('span');category.className='tag news-category';category.textContent=(item.topics||[]).map(key=>newsTopics[key]||key).join(' · ')||item.category;
     const heading=document.createElement('h3'),link=document.createElement('a');link.href=url.href;link.target='_blank';link.rel='noopener noreferrer';link.textContent=item.title;heading.append(link);
-    const context=document.createElement('p');context.className='news-relevance';context.textContent=item.context;card.append(meta,category,heading,context);list.append(card);
+    const context=document.createElement('p');context.className='news-relevance';context.textContent=item.context;const view=document.createElement('button');view.type='button';view.className='news-chart-link';view.textContent='View on chart';view.addEventListener('click',()=>focusNews(item));card.append(meta,category,heading,context,view);list.append(card);
   }
   if(!list.children.length){const empty=document.createElement('div');empty.className='news-empty';empty.textContent=data.error?'News is temporarily unavailable. Try again shortly.':'No recent relevant stories for these filters.';list.append(empty);}
   $('news-more').hidden=items.length<=newsState.visible;$('news-result-count').textContent=`Showing ${Math.min(items.length,newsState.visible)} of ${items.length} matching stories`;
@@ -94,13 +95,45 @@ function newsRender(){
   $('news-updated').textContent=data.fetchedAt?'Fetched '+new Date(data.fetchedAt).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})+' · publisher times shown on stories':'No successful news fetch yet';
   const health=$('news-source-health');health.replaceChildren();
   for(const source of data.sources||[]){const details=document.createElement('details'),summary=document.createElement('summary'),body=document.createElement('p');const age=source.fetchedAt?Math.max(0,Math.floor((Date.now()-Date.parse(source.fetchedAt))/60000)):null;summary.textContent=`${source.name} · ${{ok:'Fresh',stale:'Cached',error:'Unavailable'}[source.status]||'Unavailable'}${age!==null?' · '+age+'m ago':''}`;body.textContent=`${source.itemCount||0} eligible stories${source.truncated?' · Source limit reached (32 articles)':''}${source.error?' · '+source.error:''}${source.lastAttemptAt?' · Last attempt '+new Date(source.lastAttemptAt).toLocaleString():''}`;details.append(summary,body);health.append(details);}
+  const all=data.items||[];priceChart.setEvents(all.map(item=>({id:item.id,time:Date.parse(item.publishedAt)/1000,title:item.title,source:item.source,category:item.category})));
+  for(const button of [...$('news-marker-stories').children])if(!all.some(item=>item.id===button.dataset.newsId))button.remove();
+  if(newsState.selected&&!all.some(item=>item.id===newsState.selected)){newsState.selected=null;$('news-marker-stories').replaceChildren();$('news-daily').hidden=true;$('news-selection').textContent='Selected story is no longer in the current feed.';}
+  $('news-clear').hidden=!newsState.selected&&!$('news-marker-stories').children.length;
 }
-function newsFallback(previous,message,now=Date.now()){const fetched=Date.parse(previous?.fetchedAt);if(previous&&Number.isFinite(fetched)&&fetched<=now&&now-fetched<=86400000)return {...previous,stale:true,partial:true,error:message,sources:(previous.sources||[]).map(s=>({...s,status:'stale',error:message}))};return {items:[],sources:[],fetchedAt:null,stale:true,partial:true,error:message};}
+function selectNewsGroup(group){
+  const list=$('news-marker-stories');list.replaceChildren();
+  for(const event of group.events||[]){const button=document.createElement('button');button.type='button';button.dataset.newsId=event.id;button.textContent=event.title;button.addEventListener('click',()=>selectNewsEvent(event));list.append(button);}
+  $('news-selection').textContent=`${list.children.length} headline(s) published in this candle. Choose a story to view its source and context.`;
+  $('news-clear').hidden=!list.children.length;
+  list.querySelector('button')?.focus();
+}
+async function selectNewsEvent(event){
+  const item=(newsState.data?.items||[]).find(item=>item.id===event.id);if(!item)return;
+  const dialog=$('expanded-chart-dialog');if(dialog.open)await new Promise(resolve=>{dialog.addEventListener('close',resolve,{once:true});dialog.close();});
+  newsState.selected=item.id;$('news-filter').value='all';$('news-source').value='all';$('news-search').value='';newsState.visible=Math.max(6,Math.ceil(((newsState.data.items.indexOf(item))+1)/6)*6);newsRender();
+  $('news-selection').textContent=item.title+' · '+new Date(item.publishedAt).toLocaleString()+' · Publication timing is context, not proof of price causation.';
+  const card=[...$('news-list').children].find(card=>card.dataset.newsId===item.id);if(card){card.tabIndex=-1;card.focus();card.scrollIntoView({block:'nearest'});}
+}
+function focusNews(item){
+  newsState.selected=item.id;$('news-marker-stories').replaceChildren();chartPrefs.news=true;$('show-news').checked=true;saveGraphPrefs();
+  const result=priceChart.focusTime(Date.parse(item.publishedAt)/1000);newsRender();
+  $('news-selection').textContent=result.focused?'Chart focused on publication time · '+item.title:'Publication time is outside the loaded chart history or falls in a missing interval.';
+  $('news-daily').hidden=result.focused||chartPrefs.timeframe===86400;
+  if(result.focused){$('chart').focus();$('chart').scrollIntoView({block:'center'});}
+}
+function retainNewsSources(previous,now=Date.now()){
+  const fetched=Date.parse(previous?.fetchedAt),validTime=time=>Number.isFinite(time)&&time<=now&&now-time<=86400000;
+  if(!previous?.sources?.length)return previous&&validTime(fetched)?previous:{items:[],sources:[],fetchedAt:null,stale:true,partial:true,error:'Cached news expired or unavailable'};
+  const times=[],sources=previous.sources.map(source=>{const time=source.fetchedAt===undefined?fetched:Date.parse(source.fetchedAt);if(validTime(time)&&source.status!=='error'){times.push(time);return {...source};}return {...source,status:'error',error:source.fetchedAt? 'Cached source expired':source.error||'Source unavailable'};});
+  const valid=new Set(sources.filter(source=>source.status!=='error').map(source=>source.id));
+  return {...previous,sources,items:(previous.items||[]).filter(item=>item.sourceId?valid.has(item.sourceId):validTime(fetched)),fetchedAt:times.length?new Date(Math.min(...times)).toISOString():null,stale:sources.some(source=>source.status==='stale'),partial:previous.partial||sources.some(source=>source.status!=='ok'),error:times.length?previous.error:'News sources unavailable or expired'};
+}
+function newsFallback(previous,message,now=Date.now()){const data=retainNewsSources(previous,now);return {...data,stale:true,partial:true,error:message,sources:data.sources.map(source=>source.status==='error'?source:{...source,status:'stale',error:message})};}
 async function refreshNews(){if(newsState.busy)return;newsState.busy=true;$('news-refresh').disabled=true;$('news-list').setAttribute('aria-busy','true');$('news-status').textContent='Refreshing sources…';try{const response=await fetch('/api/news',{signal:AbortSignal.timeout(18000),cache:'no-store'});const data=await response.json();if(!response.ok&&!(response.status===503&&Array.isArray(data.sources)))throw new Error(data.error||'News connection unavailable');newsState.data=data;newsRender();}catch(error){newsState.data=newsFallback(newsState.data,error.message);newsRender();}finally{newsState.busy=false;$('news-refresh').disabled=false;$('news-list').setAttribute('aria-busy','false');}}
 document.querySelectorAll('[data-days]').forEach(button=>button.addEventListener('click',()=>{chartPrefs.bars=Number(button.dataset.days);document.querySelectorAll('[data-days]').forEach(b=>b.classList.toggle('selected',b===button));saveGraphPrefs();priceChart.resetView();}));
 $('refresh').addEventListener('click',async()=>{await loadSettings();await refresh();await refreshGraph(true);await checkAlert();});
 $('chart-timeframe').value=chartPrefs.timeframe;$('chart-type').value=chartPrefs.type;$('chart-scale').value=chartPrefs.scale;$('chart-fit').value=chartPrefs.fit||'levels';
-for(const [id,key] of [['show-profile','profile'],['show-ema','ema'],['show-volume','volume'],['show-levels','levels'],['show-flips','flips'],['show-rsi','rsi'],['show-macd','macd']]){$(id).checked=!!chartPrefs[key];$(id).addEventListener('change',()=>{chartPrefs[key]=$(id).checked;saveGraphPrefs();});}
+for(const [id,key] of [['show-profile','profile'],['show-ema','ema'],['show-volume','volume'],['show-levels','levels'],['show-flips','flips'],['show-rsi','rsi'],['show-macd','macd'],['show-news','news']]){$(id).checked=!!chartPrefs[key];$(id).addEventListener('change',()=>{chartPrefs[key]=$(id).checked;saveGraphPrefs();});}
 $('chart-timeframe').addEventListener('change',()=>{chartPrefs.timeframe=Number($('chart-timeframe').value);graphState.generation++;graphState.candles=[];graphState.loadedAt=0;$('chart-empty').style.display='flex';$('chart-empty').textContent='Loading selected chart interval…';saveGraphPrefs();refreshGraph(true);});
 $('chart-type').addEventListener('change',()=>{chartPrefs.type=$('chart-type').value;saveGraphPrefs();});$('chart-scale').addEventListener('change',()=>{chartPrefs.scale=$('chart-scale').value;saveGraphPrefs();});$('chart-reset').addEventListener('click',()=>priceChart.resetView());$('chart-options-open').addEventListener('click',()=>$('chart-options-dialog').showModal());$('chart-options-close').addEventListener('click',()=>$('chart-options-dialog').close());
 $('chart-fit').addEventListener('change',()=>{chartPrefs.fit=$('chart-fit').value;saveGraphPrefs();});
@@ -112,6 +145,9 @@ document.querySelectorAll('[data-days]').forEach(b=>b.classList.toggle('selected
 $('news-refresh').addEventListener('click',refreshNews);
 for(const id of ['news-filter','news-source','news-search'])$(id).addEventListener(id==='news-search'?'input':'change',()=>{newsState.visible=6;newsRender();});
 $('news-more').addEventListener('click',()=>{newsState.visible+=6;newsRender();});refreshNews();setInterval(()=>{if(!document.hidden)refreshNews();},300000);
+$('news-clear').addEventListener('click',()=>{newsState.selected=null;$('news-selection').textContent='';$('news-marker-stories').replaceChildren();$('news-daily').hidden=true;newsRender();});
+$('news-daily').addEventListener('click',async()=>{const item=(newsState.data?.items||[]).find(item=>item.id===newsState.selected);if(!item)return;chartPrefs.timeframe=86400;$('chart-timeframe').value='86400';graphState.generation++;graphState.candles=[];graphState.loadedAt=0;saveGraphPrefs();await refreshGraph();focusNews(item);});
+mountCalendar();
 function renderArmed(){$('pause').textContent=state.armed?'Pause alerts':'Resume alerts';$('armed-badge').textContent=state.serverReady?(state.armed?'ARMED':'PAUSED'):'LOADING';$('rule-summary').textContent=`${usd(config.levels.S1)} support / ${usd(config.levels.R1)} resistance · ${{immediate:'Immediate breach',close:'Completed daily close',retest:'Daily retest'}[config.mode]} · ${config.cooldownMinutes}m cooldown${config.mode==='retest'?' · ±'+config.retestTolerance+'% within '+config.retestCandles+' daily candles':''} · Revision ${config.revision} · ${state.armed?'armed':'paused'}`;}
 $('pause').addEventListener('click',async()=>{if(!state.serverReady)return toast('Saved settings service is unavailable.');try{showMonitor(await api('config',{...config,armed:!config.armed,expectedRevision:config.revision}));persist();}catch(e){toast(e.message);}});
 $('notify').addEventListener('click',async()=>{if(!('Notification' in window)){toast('This browser does not support desktop notifications. In-page alerts remain available.');return;}try{const permission=await Notification.requestPermission();$('notification-note').textContent=permission==='granted'?'Browser notifications enabled. Keep this page open and connected.':'Notifications are not enabled. You can change permission in browser settings; in-page alerts still work.';$('notify').textContent=permission==='granted'?'Notifications enabled':'Enable notifications';}catch{toast('Browser notifications unavailable. In-page alerts remain active.');}});

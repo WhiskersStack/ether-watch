@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PriceChart, normalizeChartCandles, viewportBounds, calculateEMA, calculateRSI, calculateMACD, calculateChartIndicators, calculatePriceBounds, estimateVolumeProfile, findDailyFlips, layoutAxisLabels, normalizeChartOptions, DEFAULT_CHART_OPTIONS } from './dist/chart.mjs';
+import { PriceChart, normalizeChartCandles, normalizeChartEvents, findContainingCandle, groupChartEvents, viewportBounds, calculateEMA, calculateRSI, calculateMACD, calculateChartIndicators, calculatePriceBounds, estimateVolumeProfile, findDailyFlips, layoutAxisLabels, normalizeChartOptions, DEFAULT_CHART_OPTIONS } from './dist/chart.mjs';
 
 const DAY = 86400;
 const START = Date.UTC(2026, 9, 14) / 1000;
 const candle = (time, close = 2500, volume = 100) => ({ time, low: close - 10, high: close + 10, open: close - 2, close, volume });
 const rows = (count = 120) => Array.from({ length: count }, (_, index) => candle(START - (count - index) * DAY, 2500 + index));
+const headline = (id, time) => ({ id, time, title: 'Headline ' + id, source: 'Publisher', category: 'Ethereum' });
 
 test('chart candles accept coherent exchange rows, deduplicate and sort without modifying inputs', () => {
   const valid = candle(START - DAY), earlier = candle(START - 2 * DAY);
@@ -23,6 +24,31 @@ test('chart rejects non-finite, inconsistent, future, misaligned and non-positiv
   assert.deepEqual(normalizeChartCandles([good], 0), []);
   assert.deepEqual(normalizeChartCandles(undefined), []);
   assert.equal(normalizeChartCandles([candle(START + 900)], 900, (START + 901) * 1000).length, 1, 'current candle is retained');
+});
+
+test('chart events normalize UTC timestamps, deduplicate IDs and reject invalid or future publications', () => {
+  const first = headline('a', START - 10), replacement = { ...first, title: 'Updated headline' };
+  const input = [headline('b', START - 0.5), first, null, replacement, headline('future', START + 0.001), { ...first, id: '' }, { ...first, time: NaN }, { ...first, title: '' }, { ...first, source: null }];
+  const result = normalizeChartEvents(input, START * 1000);
+  assert.deepEqual(result.map(item => item.id), ['a', 'b']);
+  assert.equal(result[0].title, 'Updated headline');
+  result[0].title = 'Changed by caller';
+  assert.equal(replacement.title, 'Updated headline');
+  assert.deepEqual(normalizeChartEvents(undefined), []);
+});
+
+test('news grouping uses containing UTC candle intervals, excludes gaps and handles exact boundaries', () => {
+  for (const granularity of [900, 3600, DAY]) {
+    const data = [candle(START - 2 * granularity), candle(START)];
+    const events = [headline('before', data[0].time - 1), headline('start', data[0].time), headline('inside', data[0].time + granularity - 0.001), headline('gap', START - granularity), headline('next', START), headline('after', START + granularity)];
+    const groups = groupChartEvents(events, data, granularity);
+    assert.deepEqual(groups.map(group => group.time), [data[0].time, START]);
+    assert.deepEqual(groups[0].events.map(item => item.id), ['start', 'inside']);
+    assert.deepEqual(groups[1].events.map(item => item.id), ['next']);
+    assert.equal(findContainingCandle(data, START - granularity, granularity), -1);
+    assert.equal(findContainingCandle(data, START, granularity), 1);
+    assert.equal(findContainingCandle(data, START + granularity, granularity), -1);
+  }
 });
 
 test('viewport clamps zoom and pan to valid bars including short and empty history', () => {
@@ -153,6 +179,9 @@ test('display options restrict malformed stored values and copy defaults', () =>
   assert.equal(DEFAULT_CHART_OPTIONS.fit, 'levels');
   assert.equal(DEFAULT_CHART_OPTIONS.rsi, false);
   assert.equal(DEFAULT_CHART_OPTIONS.macd, false);
+  assert.equal(DEFAULT_CHART_OPTIONS.news, false);
+  assert.equal(normalizeChartOptions({ news: 'true' }).news, false);
+  assert.equal(normalizeChartOptions({ news: true }).news, true);
   assert.equal(normalizeChartOptions({ fit: 'unsupported', rsi: 'true', macd: 1 }).fit, 'levels');
   assert.equal(normalizeChartOptions({ fit: 'candles', rsi: true, macd: true }).fit, 'candles');
 });
@@ -278,6 +307,118 @@ test('historical views are not stretched by a new live price in the default fit 
   assert.deepEqual(chart.viewport, viewport);
   assert.equal(chart.geometry.max, maximum);
   assert.ok(calls.some(call => call.key === 'fillText' && call.args[0] === '↑ Live $6,000'));
+});
+
+test('event updates and marker toggles preserve the viewport and focused timestamp', () => {
+  const { canvas } = fakeCanvas(), chart = new PriceChart(canvas);
+  const data = rows();
+  chart.setData(data).setOptions({ bars: 30 });
+  chart.zoom(0.85); chart.keyDown(event({ key: 'ArrowLeft' }));
+  const viewport = { ...chart.viewport };
+  chart.setEvents([headline('a', data[60].time + 60)]);
+  assert.deepEqual(chart.viewport, viewport);
+  assert.deepEqual(chart.newsHits, []);
+  chart.setOptions({ news: true });
+  assert.deepEqual(chart.viewport, viewport);
+  assert.deepEqual(chart.focusTime(data[60].time + 60), { focused: true });
+  const focusedViewport = { ...chart.viewport }, focusedTime = chart.focusedTime;
+  chart.setEvents([headline('a', focusedTime), headline('b', focusedTime + 60)]);
+  chart.setData([...data, candle(START)]);
+  assert.deepEqual(chart.viewport, focusedViewport);
+  assert.equal(chart.focusedTime, focusedTime);
+  assert.equal(chart.newsHits.find(hit => hit.time === data[60].time).events.length, 2);
+});
+
+test('focusTime reports missing and unavailable history without changing timeframe or zoom', () => {
+  const { canvas } = fakeCanvas(), chart = new PriceChart(canvas);
+  const data = [candle(START - 3 * DAY), candle(START - DAY)];
+  chart.setData(data);
+  const viewport = { ...chart.viewport };
+  assert.deepEqual(chart.focusTime('2026-10-14'), { focused: false, reason: 'invalid-time' });
+  assert.deepEqual(chart.focusTime(Date.now() / 1000 + 60), { focused: false, reason: 'future-time' });
+  assert.deepEqual(chart.focusTime(data[0].time - 1), { focused: false, reason: 'outside-history' });
+  assert.deepEqual(chart.focusTime(START - 2 * DAY), { focused: false, reason: 'missing-candle' });
+  assert.deepEqual(chart.focusTime(START), { focused: false, reason: 'outside-history' });
+  assert.deepEqual(chart.viewport, viewport);
+  assert.deepEqual(chart.focusTime(data[0].time + 30), { focused: true });
+  assert.equal(chart.granularity, DAY);
+  assert.equal(chart.viewport.bars, viewport.bars);
+  assert.equal(chart.options.news, false, 'focusing does not silently change marker preferences');
+});
+
+test('focus near the newest candle stays anchored when later candles arrive', () => {
+  const { canvas } = fakeCanvas(), chart = new PriceChart(canvas);
+  const data = rows();
+  chart.setData(data).setOptions({ bars: 30 });
+  chart.focusTime(data.at(-1).time + 30);
+  const viewport = { ...chart.viewport }, time = chart.focusedTime;
+  chart.setData([...data, candle(START)]);
+  assert.deepEqual(chart.viewport, viewport);
+  assert.equal(chart.focusedTime, time);
+  chart.resetView();
+  assert.equal(chart.focusedTime, null);
+  assert.equal(chart.viewport.end, data.length + 1);
+});
+
+test('count markers select cloned headline groups and leave the viewport unchanged', () => {
+  const { canvas, calls } = fakeCanvas(), tooltip = { hidden: true, style: {} }, selected = [], errors = [];
+  const chart = new PriceChart(canvas, { tooltip, onEventSelect: group => selected.push(group), onError: error => errors.push(error) });
+  const data = rows();
+  chart.setData(data).setOptions({ bars: 30, news: true });
+  chart.setEvents([headline('a', data[110].time + 30), headline('b', data[110].time + 60)]);
+  const marker = chart.newsHits[0], viewport = { ...chart.viewport };
+  assert.equal(chart.newsHits.length, 1);
+  assert.ok(calls.some(call => call.key === 'fillText' && call.args[0] === '2' && call.args[2] === 24));
+  chart.pointerMove(event({ pointerType: 'mouse', pointerId: 1, clientX: marker.x, clientY: marker.y }));
+  assert.match(tooltip.textContent, /2 headlines.*UTC/);
+  chart.pointerDown(event({ pointerType: 'mouse', pointerId: 1, button: 0, clientX: marker.x, clientY: marker.y }));
+  chart.pointerUp(event({ pointerType: 'mouse', pointerId: 1, clientX: marker.x, clientY: marker.y }));
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].time, data[110].time);
+  assert.deepEqual(selected[0].events.map(item => item.id), ['a', 'b']);
+  assert.deepEqual(chart.viewport, viewport);
+  selected[0].events[0].title = 'Changed outside the chart';
+  assert.equal(chart.events[0].title, 'Headline a');
+  assert.deepEqual(errors, []);
+});
+
+test('marker gestures do not select a story after dragging, cancelling or adding a second touch', () => {
+  const { canvas } = fakeCanvas(), selected = [], chart = new PriceChart(canvas, { onEventSelect: group => selected.push(group) });
+  const data = rows();
+  chart.setData(data).setOptions({ news: true }).setEvents([headline('a', data[110].time + 30)]);
+  const marker = chart.newsHits[0];
+  const at = (pointerId, values = {}) => event({ pointerType: 'touch', pointerId, clientX: marker.x, clientY: marker.y, ...values });
+  const down = at(1); chart.pointerDown(down);
+  const move = at(1, { clientY: marker.y + 20 }); chart.pointerMove(move);
+  chart.pointerUp(at(1));
+  assert.equal(down.prevented, false);
+  assert.equal(move.prevented, false);
+  assert.equal(selected.length, 0);
+  chart.pointerDown(at(2)); chart.pointerCancel(at(2)); chart.pointerUp(at(2));
+  chart.pointerDown(at(3)); chart.pointerDown(at(4)); chart.pointerUp(at(3)); chart.pointerUp(at(4));
+  assert.equal(selected.length, 0);
+  assert.equal(chart.markerPress, null);
+  assert.equal(chart.touchPointers.size, 0);
+  chart.pointerDown(at(5)); chart.pointerUp(at(5));
+  assert.equal(selected.length, 1, 'a later ordinary tap still selects its group');
+});
+
+test('hidden, removed and empty-data markers never retain active hit areas', () => {
+  const { canvas } = fakeCanvas(), selected = [], chart = new PriceChart(canvas, { onEventSelect: group => selected.push(group) });
+  const data = rows();
+  chart.setData(data).setOptions({ news: true }).setEvents([headline('a', data[110].time + 30)]);
+  const marker = chart.newsHits[0];
+  chart.setOptions({ news: false });
+  assert.deepEqual(chart.newsHits, []);
+  assert.equal(chart.hitNews({ x: marker.x, y: marker.y }), null);
+  chart.setOptions({ news: true });
+  chart.setEvents([]);
+  assert.deepEqual(chart.newsHits, []);
+  chart.setEvents([headline('a', data[110].time + 30)]);
+  chart.setData([]);
+  assert.deepEqual(chart.newsHits, []);
+  assert.equal(chart.geometry, null);
+  assert.equal(selected.length, 0);
 });
 
 test('renderer updates data, emits visible profile and clears stale geometry/tooltip on empty input', () => {

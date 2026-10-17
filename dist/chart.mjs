@@ -1,7 +1,7 @@
 export const DEFAULT_CHART_OPTIONS = Object.freeze({
   type: 'candles', ema: false, volume: true, profile: true,
   levels: true, flips: true, scale: 'linear', bars: 90,
-  fit: 'levels', rsi: false, macd: false,
+  fit: 'levels', rsi: false, macd: false, news: false,
 });
 
 const DAY = 86400;
@@ -23,6 +23,40 @@ export function normalizeChartCandles(rows, granularity = DAY, now = Date.now())
     byTime.set(candle.time, { time: candle.time, low: candle.low, high: candle.high, open: candle.open, close: candle.close, volume: candle.volume });
   }
   return [...byTime.values()].sort((a, b) => a.time - b.time);
+}
+
+export function normalizeChartEvents(rows, now = Date.now()) {
+  if (!Array.isArray(rows) || !Number.isFinite(now)) return [];
+  const events = new Map();
+  for (const row of rows) {
+    if (typeof row?.id !== 'string' || !row.id.trim() || !Number.isFinite(row.time) || row.time < 0 || row.time > now / 1000) continue;
+    if (typeof row.title !== 'string' || !row.title.trim() || typeof row.source !== 'string' || !row.source.trim()) continue;
+    events.set(row.id, { id: row.id, time: row.time, title: row.title.trim(), source: row.source.trim(), category: typeof row.category === 'string' ? row.category.trim() : 'News' });
+  }
+  return [...events.values()].sort((a, b) => a.time - b.time || a.id.localeCompare(b.id));
+}
+
+export function findContainingCandle(candles, time, granularity = DAY) {
+  if (!Array.isArray(candles) || !Number.isFinite(time) || !Number.isInteger(granularity) || granularity <= 0) return -1;
+  let low = 0, high = candles.length - 1, index = -1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (candles[middle].time <= time) { index = middle; low = middle + 1; }
+    else high = middle - 1;
+  }
+  return index >= 0 && time < candles[index].time + granularity ? index : -1;
+}
+
+export function groupChartEvents(events, candles, granularity = DAY) {
+  if (!Array.isArray(events)) return [];
+  const groups = new Map();
+  for (const event of events) {
+    const index = findContainingCandle(candles, event?.time, granularity);
+    if (index < 0) continue;
+    if (!groups.has(index)) groups.set(index, { index, time: candles[index].time, events: [] });
+    groups.get(index).events.push({ ...event });
+  }
+  return [...groups.values()].sort((a, b) => a.index - b.index);
 }
 
 export function viewportBounds(length, bars = 90, end = length) {
@@ -178,7 +212,7 @@ export function layoutAxisLabels(labels, top, bottom, requestedGap = 14) {
 export function normalizeChartOptions(input = {}, previous = DEFAULT_CHART_OPTIONS) {
   if (!input || typeof input !== 'object') input = {};
   const options = { ...previous };
-  for (const key of ['ema', 'volume', 'profile', 'levels', 'flips', 'rsi', 'macd']) if (typeof input[key] === 'boolean') options[key] = input[key];
+  for (const key of ['ema', 'volume', 'profile', 'levels', 'flips', 'rsi', 'macd', 'news']) if (typeof input[key] === 'boolean') options[key] = input[key];
   if (['candles', 'line'].includes(input.type)) options.type = input.type;
   if (['linear', 'log'].includes(input.scale)) options.scale = input.scale;
   if (['levels', 'candles'].includes(input.fit)) options.fit = input.fit;
@@ -187,7 +221,7 @@ export function normalizeChartOptions(input = {}, previous = DEFAULT_CHART_OPTIO
 }
 
 export class PriceChart {
-  constructor(canvas, { tooltip = null, onProfile = () => {}, onError = () => {} } = {}) {
+  constructor(canvas, { tooltip = null, onProfile = () => {}, onError = () => {}, onEventSelect = () => {} } = {}) {
     if (!canvas || typeof canvas.getContext !== 'function') throw new TypeError('A chart canvas is required.');
     this.canvas = canvas;
     this.context = canvas.getContext('2d');
@@ -195,9 +229,15 @@ export class PriceChart {
     this.tooltip = tooltip;
     this.onProfile = onProfile;
     this.onError = onError;
+    this.onEventSelect = onEventSelect;
     this.options = { ...DEFAULT_CHART_OPTIONS };
     this.candles = [];
     this.levels = [];
+    this.events = [];
+    this.newsHits = [];
+    this.hoveredNews = null;
+    this.markerPress = null;
+    this.focusedTime = null;
     this.price = null;
     this.granularity = DAY;
     this.viewport = viewportBounds(0);
@@ -221,6 +261,7 @@ export class PriceChart {
       if (this.drag) return;
       this.touchPointers.delete(event.pointerId);
       this.pendingTouch = null;
+      this.markerPress = null;
       this.clearHover();
     });
     this.listen('pointerdown', event => this.pointerDown(event));
@@ -228,7 +269,7 @@ export class PriceChart {
     this.listen('pointercancel', event => this.pointerCancel(event));
     this.listen('lostpointercapture', () => {
       if (this.drag) this.touchPointers.delete(this.drag.pointerId);
-      this.drag = null; this.pendingTouch = null; canvas.style.cursor = 'crosshair';
+      this.drag = null; this.pendingTouch = null; this.markerPress = null; canvas.style.cursor = 'crosshair';
     });
     this.listen('wheel', event => this.wheel(event), { passive: false });
     this.listen('keydown', event => this.keyDown(event));
@@ -253,7 +294,7 @@ export class PriceChart {
 
   setData(candles, { price = null, levels = [], granularity = this.granularity } = {}) {
     const previousLength = this.candles.length;
-    const wasLatest = this.viewEnd >= previousLength;
+    const wasLatest = this.viewEnd >= previousLength && this.focusedTime === null;
     const endTime = this.candles[this.viewport.end - 1]?.time;
     const changedTimeframe = granularity !== this.granularity;
     if (changedTimeframe || !candles?.length) { this.cancelGesture(); this.touchPointers.clear(); }
@@ -271,9 +312,34 @@ export class PriceChart {
       const index = this.candles.findIndex(candle => candle.time >= endTime);
       this.viewEnd = index < 0 ? this.candles.length : index + 1;
     }
+    if (!previousLength && this.focusedTime !== null) {
+      const index = findContainingCandle(this.candles, this.focusedTime, this.granularity);
+      if (index >= 0) this.viewEnd = index + 0.5 + this.viewBars / 2;
+    }
     this.hover = null;
     this.render();
     return this;
+  }
+
+  setEvents(events) {
+    this.events = normalizeChartEvents(events);
+    this.render();
+    return this;
+  }
+
+  focusTime(time) {
+    if (!Number.isFinite(time) || time < 0) return { focused: false, reason: 'invalid-time' };
+    if (time > Date.now() / 1000) return { focused: false, reason: 'future-time' };
+    if (!this.candles.length || time < this.candles[0].time || time >= this.candles.at(-1).time + this.granularity) return { focused: false, reason: 'outside-history' };
+    const index = findContainingCandle(this.candles, time, this.granularity);
+    if (index < 0) return { focused: false, reason: 'missing-candle' };
+    this.focusedTime = time;
+    this.viewBars = this.viewport.bars || this.options.bars;
+    this.viewEnd = index + 0.5 + this.viewBars / 2;
+    this.hover = null;
+    this.hoveredNews = null;
+    this.render();
+    return { focused: true };
   }
 
   setOptions(input) {
@@ -289,12 +355,15 @@ export class PriceChart {
     this.viewBars = this.options.bars;
     this.viewEnd = this.candles.length;
     this.hover = null;
+    this.focusedTime = null;
     this.render();
     return this;
   }
 
   clearHover() {
     this.hover = null;
+    this.hoveredNews = null;
+    if (!this.drag) this.canvas.style.cursor = 'crosshair';
     if (this.tooltip) this.tooltip.hidden = true;
     this.render();
   }
@@ -311,6 +380,11 @@ export class PriceChart {
     }
     if (!this.geometry || (event.button !== undefined && event.button !== 0)) { this.touchPointers.delete(event.pointerId); return; }
     const point = this.point(event), g = this.geometry;
+    const marker = this.hitNews(point);
+    if (marker) {
+      this.markerPress = { pointerId: event.pointerId, x: point.x, y: point.y, time: marker.time, moved: false };
+      return;
+    }
     if (point.x < g.left || point.x > g.right || point.y < g.top || point.y > g.contentBottom) { this.touchPointers.delete(event.pointerId); return; }
     if (event.pointerType === 'touch') {
       this.pendingTouch = { pointerId: event.pointerId, x: point.x, y: point.y, end: this.viewport.end, step: g.step };
@@ -326,6 +400,10 @@ export class PriceChart {
   pointerMove(event) {
     if (!this.geometry) return;
     const point = this.point(event);
+    if (this.markerPress && this.markerPress.pointerId === event.pointerId) {
+      if (Math.hypot(point.x - this.markerPress.x, point.y - this.markerPress.y) > 8) this.markerPress.moved = true;
+      return;
+    }
     if (event.pointerType === 'touch') {
       if (this.touchPointers.size > 1) return;
       if (this.pendingTouch?.pointerId === event.pointerId) {
@@ -348,6 +426,16 @@ export class PriceChart {
       return;
     }
     const g = this.geometry;
+    const marker = this.hitNews(point);
+    if (marker) {
+      this.hover = null;
+      this.hoveredNews = marker.time;
+      this.canvas.style.cursor = 'pointer';
+      this.render();
+      return;
+    }
+    this.hoveredNews = null;
+    this.canvas.style.cursor = 'crosshair';
     if (point.x < g.left || point.x > g.right || point.y < g.top || point.y > g.contentBottom) { this.clearHover(); return; }
     this.hover = { index: clamp(Math.floor((point.x - g.left) / g.step), 0, this.viewport.bars - 1), y: point.y };
     this.render();
@@ -356,6 +444,16 @@ export class PriceChart {
   pointerUp(event) {
     const touch = event.pointerType === 'touch' || this.touchPointers.has(event.pointerId);
     this.touchPointers.delete(event.pointerId);
+    if (this.markerPress && this.markerPress.pointerId === event.pointerId) {
+      const press = this.markerPress, marker = this.hitNews(this.point(event));
+      this.markerPress = null;
+      if (!press.moved && marker?.time === press.time) {
+        this.focusedTime = marker.time;
+        this.render();
+        this.onEventSelect({ time: marker.time, events: marker.events.map(item => ({ ...item })) });
+      }
+      return;
+    }
     if (event.pointerId !== this.drag?.pointerId && event.pointerId !== this.pendingTouch?.pointerId) return;
     this.cancelGesture();
     if (touch) this.clearHover(); else this.pointerMove(event);
@@ -363,7 +461,7 @@ export class PriceChart {
 
   pointerCancel(event) {
     this.touchPointers.delete(event.pointerId);
-    if (event.pointerId === this.drag?.pointerId || event.pointerId === this.pendingTouch?.pointerId) this.cancelGesture();
+    if (event.pointerId === this.drag?.pointerId || event.pointerId === this.pendingTouch?.pointerId || event.pointerId === this.markerPress?.pointerId) this.cancelGesture();
     this.clearHover();
   }
 
@@ -371,6 +469,7 @@ export class PriceChart {
     const pointerId = this.drag?.pointerId;
     this.drag = null;
     this.pendingTouch = null;
+    this.markerPress = null;
     if (pointerId !== undefined && this.canvas.hasPointerCapture?.(pointerId)) this.canvas.releasePointerCapture?.(pointerId);
     this.canvas.style.cursor = 'crosshair';
   }
@@ -410,7 +509,7 @@ export class PriceChart {
   render() {
     if (this.destroyed) return;
     try { this.draw(); }
-    catch (error) { this.geometry = null; this.hover = null; if (this.tooltip) this.tooltip.hidden = true; this.onError(error); }
+    catch (error) { this.geometry = null; this.newsHits = []; this.hover = null; if (this.tooltip) this.tooltip.hidden = true; this.onError(error); }
   }
 
   draw() {
@@ -423,11 +522,12 @@ export class PriceChart {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     this.geometry = null;
+    this.newsHits = [];
     this.viewport = viewportBounds(this.candles.length, this.viewBars, this.viewEnd);
     this.viewEnd = this.viewport.end;
     const data = this.candles.slice(this.viewport.start, this.viewport.end);
     if (!data.length || w < 140 || h < 120) { if (this.tooltip) this.tooltip.hidden = true; this.hover = null; this.onProfile(null); return; }
-    const left = 10, right = w - (w < 420 ? 84 : 102), top = 18;
+    const left = 10, right = w - (w < 420 ? 84 : 102), top = this.options.news ? 64 : 18;
     const bottom = h - (this.options.volume ? 76 : 32) - this.extraPaneHeight, volumeBottom = h - 26 - this.extraPaneHeight;
     if (bottom < top + 40) { this.hover = null; if (this.tooltip) this.tooltip.hidden = true; return; }
     const step = (right - left) / data.length, x = index => left + (index + 0.5) * step;
@@ -548,7 +648,55 @@ export class PriceChart {
       const labelWidth = ctx.measureText(text).width;
       ctx.fillText(text, clamp(x(index) - labelWidth / 2, left, right - labelWidth), h - 7);
     }
+    this.drawNewsRail();
+    this.drawFocusedTime();
     this.drawHover(data);
+  }
+
+  hitNews(point) {
+    if (!this.options.news || !this.geometry) return null;
+    return this.newsHits.filter(hit => Math.abs(hit.x - point.x) <= 14 && Math.abs(hit.y - point.y) <= 14)
+      .sort((a, b) => Math.abs(a.x - point.x) - Math.abs(b.x - point.x))[0] || null;
+  }
+
+  drawNewsRail() {
+    if (!this.options.news) return;
+    const g = this.geometry, ctx = this.context;
+    const groups = groupChartEvents(this.events, this.candles, this.granularity).filter(group => group.index >= this.viewport.start && group.index < this.viewport.end);
+    const positions = layoutAxisLabels(groups.map(group => ({ group, y: g.x(group.index - this.viewport.start) })), g.left + 12, g.right - 12, 28);
+    ctx.save(); ctx.setLineDash([]); ctx.lineWidth = 1;
+    ctx.strokeStyle = palette.grid;
+    ctx.beginPath(); ctx.moveTo(g.left, g.top - 10); ctx.lineTo(g.right, g.top - 10); ctx.stroke();
+    for (const position of positions) {
+      const anchorX = g.x(position.group.index - this.viewport.start);
+      ctx.strokeStyle = '#92bee977';
+      ctx.beginPath(); ctx.moveTo(position.y, 31); ctx.lineTo(anchorX, g.top - 10); ctx.stroke();
+      ctx.fillStyle = '#92bee9'; ctx.beginPath(); ctx.arc(anchorX, g.top - 10, 2, 0, Math.PI * 2); ctx.fill();
+    }
+    const focusedIndex = findContainingCandle(this.candles, this.focusedTime, this.granularity);
+    for (const position of positions) {
+      const group = position.group;
+      const selected = group.index === focusedIndex;
+      ctx.fillStyle = selected ? '#c2ef83' : '#253424'; ctx.strokeStyle = '#a4c984';
+      ctx.beginPath(); ctx.arc(position.y, 20, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = selected ? '#172014' : '#dcebd5'; ctx.font = '11px DM Sans, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(group.events.length > 99 ? '99+' : String(group.events.length), position.y, 24);
+      this.newsHits.push({ ...group, x: position.y, y: 20 });
+    }
+    ctx.textAlign = 'left'; ctx.fillStyle = palette.muted; ctx.font = '11px DM Sans, sans-serif';
+    ctx.fillText('News', g.right + 8, 24);
+    ctx.restore();
+  }
+
+  drawFocusedTime() {
+    const index = findContainingCandle(this.candles, this.focusedTime, this.granularity);
+    if (index < this.viewport.start || index >= this.viewport.end) return;
+    const g = this.geometry, ctx = this.context, x = g.x(index - this.viewport.start);
+    ctx.save();
+    ctx.fillStyle = '#c2ef8312'; ctx.fillRect(x - g.step * 0.45, g.top, Math.max(1, g.step * 0.9), g.contentBottom - g.top);
+    ctx.strokeStyle = '#c2ef83bb'; ctx.setLineDash([5, 4]);
+    ctx.beginPath(); ctx.moveTo(x, g.top); ctx.lineTo(x, g.contentBottom); ctx.stroke();
+    ctx.restore();
   }
 
   drawIndicators(data, start) {
@@ -609,6 +757,14 @@ export class PriceChart {
   }
 
   drawHover(data) {
+    if (this.hoveredNews !== null) {
+      const marker = this.newsHits.find(hit => hit.time === this.hoveredNews);
+      if (marker && this.tooltip) {
+        this.tooltip.textContent = marker.events.length + (marker.events.length === 1 ? ' headline' : ' headlines') + ' · ' + new Date(marker.time * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC\nSelect to view headlines';
+        this.tooltip.hidden = false;
+        return;
+      }
+    }
     if (!this.hover || !this.geometry || !data[this.hover.index]) { if (this.tooltip) this.tooltip.hidden = true; return; }
     const { index, y: py } = this.hover, g = this.geometry, ctx = this.context, candle = data[index];
     ctx.setLineDash([3, 3]); ctx.strokeStyle = '#b2c0c599';
@@ -648,6 +804,9 @@ export class PriceChart {
     this.canvas.style.touchAction = this.originalTouchAction;
     this.canvas.style.cursor = this.originalCursor;
     this.geometry = null;
+    this.newsHits = [];
+    this.markerPress = null;
+    this.hoveredNews = null;
     this.hover = null;
     this.drag = null;
     if (this.tooltip) this.tooltip.hidden = true;
