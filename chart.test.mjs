@@ -199,6 +199,27 @@ function fakeCanvas({ width = 700, height = 360 } = {}) {
 }
 const event = values => ({ prevented: false, preventDefault() { this.prevented = true; }, ...values });
 
+test('theme repaint preserves loaded data, viewport, preferences, indicators, hover and news selection',t=>{
+  const {canvas,listeners,calls}=fakeCanvas({height:590}),errors=[],tooltip={hidden:true,textContent:'',style:{}};
+  const chart=new PriceChart(canvas,{tooltip,onError:error=>errors.push(error)});
+  chart.setData(rows(180),{price:2600,levels:[{code:'S1',price:2500},{code:'R1',price:2700}]});
+  chart.setOptions({ema:true,rsi:true,macd:true,news:true,fit:'candles',scale:'log'});
+  chart.setEvents([headline('theme-fixture',chart.candles[90].time)]);
+  chart.focusTime(chart.candles[90].time);chart.zoom(.6);chart.keyDown(event({key:'ArrowLeft'}));
+  chart.hover={index:8,y:100};chart.render();
+  const refs=Object.fromEntries(['candles','events','options','indicators','ema20','ema50','levels','hover'].map(key=>[key,chart[key]]));
+  const before={viewport:{...chart.viewport},viewEnd:chart.viewEnd,viewBars:chart.viewBars,focusedTime:chart.focusedTime,tooltip:tooltip.textContent,listeners:listeners.size},callCount=calls.length;
+  const colors={'--chart-up':'#24713b','--chart-down':'#b32b3e','--chart-ema20':'#936000','--chart-rsi':'#1b69a5','--chart-text':'#172b40'};
+  const originalStyle=Object.getOwnPropertyDescriptor(globalThis,'getComputedStyle');
+  Object.defineProperty(globalThis,'getComputedStyle',{configurable:true,value:()=>({getPropertyValue:key=>colors[key]||''})});
+  t.after(()=>{if(originalStyle)Object.defineProperty(globalThis,'getComputedStyle',originalStyle);else Reflect.deleteProperty(globalThis,'getComputedStyle');});
+  chart.refreshTheme();
+  assert.equal(chart.palette.up,'#24713b');assert.equal(chart.palette.down,'#b32b3e');assert.ok(calls.length>callCount);
+  for(const [key,ref]of Object.entries(refs))assert.equal(chart[key],ref,key+' should retain identity');
+  assert.deepEqual(chart.viewport,before.viewport);assert.equal(chart.viewEnd,before.viewEnd);assert.equal(chart.viewBars,before.viewBars);assert.equal(chart.focusedTime,before.focusedTime);assert.equal(tooltip.textContent,before.tooltip);assert.equal(listeners.size,before.listeners);assert.deepEqual(errors,[]);
+  chart.destroy();
+});
+
 test('numeric axis ticks stay aligned with their gridlines without annotations', () => {
   const { canvas, calls } = fakeCanvas(), chart = new PriceChart(canvas);
   chart.setData(rows());

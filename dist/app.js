@@ -20,6 +20,16 @@ const usd = n => Number.isFinite(n) ? n.toLocaleString('en-US',{style:'currency'
 const short = n => Number.isFinite(n) ? '$'+Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:2}).format(n) : '—';
 const escapeHTML = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 try {state.events=JSON.parse(localStorage.getItem('etherwatch-alerts')||'[]').filter(e=>e&&typeof e.message==='string'&&Number.isFinite(e.time)).slice(0,50);state.armed=localStorage.getItem('etherwatch-armed')!=='false';} catch {}
+// Appearance changes never load data, save alert rules, or recreate the chart.
+function applyTheme(value, persistChoice = true) {
+  const theme = ['classic','daylight','midnight','dusk'].includes(value) ? value : 'classic';
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme === 'daylight' ? 'light' : 'dark';
+  document.querySelector('meta[name="theme-color"]').content = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
+  $('theme-select').value = theme;
+  if (persistChoice) { try { localStorage.setItem('etherwatch-theme', theme); } catch {} }
+  priceChart.refreshTheme();
+}
 function persist(){try{localStorage.setItem('etherwatch-alerts',JSON.stringify(state.events.slice(0,50)));localStorage.setItem('etherwatch-armed',String(state.armed));}catch{}}
 function toast(message){$('toast').textContent=message;$('toast').style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').style.display='none',7000);}
 function validHistoryRecord(record){return record&&typeof record.message==='string'&&Number.isFinite(record.time);}
@@ -195,6 +205,8 @@ function retainNewsSources(previous,now=Date.now()){
 }
 function newsFallback(previous,message,now=Date.now()){const data=retainNewsSources(previous,now);return {...data,stale:true,partial:true,error:message,sources:data.sources.map(source=>source.status==='error'?source:{...source,status:'stale',error:message})};}
 async function refreshNews(){if(newsState.busy)return;newsState.busy=true;$('news-refresh').disabled=true;$('news-list').setAttribute('aria-busy','true');$('news-status').textContent='Refreshing sources…';try{const response=await fetch('/api/news',{signal:AbortSignal.timeout(18000),cache:'no-store'});const data=await response.json();if(!response.ok&&!(response.status===503&&Array.isArray(data.sources)))throw new Error(data.error||'News connection unavailable');newsState.data=data;newsRender();}catch(error){newsState.data=newsFallback(newsState.data,error.message);newsRender();}finally{newsState.busy=false;$('news-refresh').disabled=false;$('news-list').setAttribute('aria-busy','false');}}
+applyTheme(document.documentElement.dataset.theme, false);
+$('theme-select').addEventListener('change',event=>applyTheme(event.target.value));
 document.querySelectorAll('[data-days]').forEach(button=>button.addEventListener('click',()=>{chartPrefs.bars=Number(button.dataset.days);document.querySelectorAll('[data-days]').forEach(b=>b.classList.toggle('selected',b===button));saveGraphPrefs();priceChart.resetView();}));
 $('refresh').addEventListener('click',async()=>{await loadSettings();await refresh();await refreshGraph(true);await checkAlert();});
 $('chart-timeframe').value=chartPrefs.timeframe;$('chart-type').value=chartPrefs.type;$('chart-scale').value=chartPrefs.scale;$('chart-fit').value=chartPrefs.fit||'levels';

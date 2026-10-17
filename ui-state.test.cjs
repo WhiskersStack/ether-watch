@@ -1,6 +1,59 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 const source=fs.readFileSync(__dirname+'/dist/app.js','utf8');
 function extract(from,to){const a=source.indexOf(from),b=source.indexOf(to,a);assert.ok(a>=0&&b>a);return source.slice(a,b);}
+
+const themeHTML=fs.readFileSync(__dirname+'/dist/index.html','utf8');
+const themeCSS=fs.readFileSync(__dirname+'/dist/style.css','utf8');
+const themeNames=['classic','daylight','midnight','dusk'];
+function themeTokens(theme){
+  const rules=[...themeCSS.matchAll(/:root(?:\[data-theme="([^"]+)"\])?\s*\{([^}]+)\}/g)];
+  const tokens={};
+  for(const [,name,body] of rules)if(!name||name===theme)for(const [,key,value] of body.matchAll(/--([\w-]+)\s*:\s*([^;]+);/g))tokens[key]=value.trim();
+  const resolve=key=>tokens[key]?.startsWith('var(')?resolve(tokens[key].slice(6,-1)):tokens[key];
+  return Object.fromEntries(Object.keys(tokens).map(key=>[key,resolve(key)]));
+}
+function contrast(a,b){
+  const luminance=color=>{const rgb=color.slice(1).match(/../g).slice(0,3).map(v=>parseInt(v,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722;};
+  const [light,dark]=[luminance(a),luminance(b)].sort((x,y)=>y-x);return (light+.05)/(dark+.05);
+}
+for(const theme of themeNames){
+  test(theme+' palette keeps text, controls, and chart indicators readable',()=>{
+    const t=themeTokens(theme);
+    for(const background of ['bg','panel','surface','input','button','chip','selected','monitor','history','decision','primary-from','primary-to'])for(const foreground of ['text','muted','text-soft'])assert.ok(contrast(t[foreground],t[background])>=4.5,theme+' '+foreground+' on '+background+' '+contrast(t[foreground],t[background]));
+    for(const foreground of ['green','red','warning','accent'])assert.ok(contrast(t[foreground],t.panel)>=4.5,theme+' '+foreground);
+    assert.ok(contrast(t['on-accent'],t.accent)>=4.5);
+    for(const background of ['bg','panel','input'])assert.ok(contrast(t['control-border'],t[background])>=3,theme+' control border on '+background);
+    for(const key of ['up','down','ema20','ema50','rsi','support','resistance'])assert.ok(contrast(t['chart-'+key],t.panel)>=3,theme+' chart '+key);
+    assert.notEqual(t['chart-up'],t['chart-down']);assert.notEqual(t['chart-ema20'],t['chart-ema50']);
+  });
+  test(theme+' is restored before stylesheet/app loading and updates browser chrome',()=>{
+    const boot=themeHTML.match(/<script>([\s\S]*?)<\/script>/)[1],root={dataset:{},style:{}},meta={};
+    const ctx=vm.createContext({localStorage:{getItem:key=>key==='etherwatch-theme'?theme:null},document:{documentElement:root,querySelector:()=>meta}});
+    vm.runInContext(boot,ctx);
+    assert.equal(root.dataset.theme,theme);assert.equal(root.style.colorScheme,theme==='daylight'?'light':'dark');assert.equal(meta.content,themeTokens(theme).bg);
+    assert.ok(themeHTML.indexOf(boot)<themeHTML.indexOf('rel="stylesheet"'));
+  });
+}
+test('theme bootstrap safely handles missing, invalid, prototype-name, and denied storage',()=>{
+  const boot=themeHTML.match(/<script>([\s\S]*?)<\/script>/)[1];
+  for(const saved of [null,'unknown','__proto__','constructor','toString','denied']){
+    const root={dataset:{},style:{}},meta={},ctx=vm.createContext({document:{documentElement:root,querySelector:()=>meta}});
+    Object.defineProperty(ctx,'localStorage',{get(){if(saved==='denied')throw Error('SecurityError');return {getItem:()=>saved};}});
+    vm.runInContext(boot,ctx);assert.equal(root.dataset.theme,'classic');assert.equal(meta.content,'#101315');
+  }
+});
+test('theme selection persists only appearance and repaints without data, alerts, or timers',()=>{
+  const stored={'etherwatch-chart':'saved chart preferences','etherwatch-armed':'false','etherwatch-alerts':'saved history','etherwatch-calendar-zone':'UTC'},original={...stored};
+  const root={dataset:{theme:'classic'},style:{}},meta={},select={},calls=[];
+  const forbidden=()=>{throw Error('Theme change must not touch application effects');};
+  const ctx=vm.createContext({document:{documentElement:root,querySelector:()=>meta},$:()=>select,getComputedStyle:()=>({getPropertyValue:()=>themeTokens(root.dataset.theme).bg}),localStorage:{setItem:(k,v)=>stored[k]=v},priceChart:{refreshTheme:()=>calls.push('paint')},fetch:forbidden,api:forbidden,loadSettings:forbidden,refresh:forbidden,refreshGraph:forbidden,checkAlert:forbidden,setInterval:forbidden,setTimeout:forbidden,Notification:forbidden});
+  vm.runInContext(extract('function applyTheme(','function persist()'),ctx);
+  for(const theme of themeNames){ctx.applyTheme(theme);assert.equal(root.dataset.theme,theme);assert.equal(select.value,theme);assert.equal(stored['etherwatch-theme'],theme);assert.equal(meta.content,themeTokens(theme).bg);}
+  assert.equal(calls.length,4);for(const [key,value]of Object.entries(original))assert.equal(stored[key],value);
+  ctx.applyTheme('invalid');assert.equal(select.value,'classic');
+  ctx.localStorage.setItem=forbidden;ctx.applyTheme('dusk',false);assert.equal(select.value,'dusk');
+  Object.defineProperty(ctx,'localStorage',{get(){throw Error('SecurityError');}});ctx.applyTheme('daylight');assert.equal(select.value,'daylight');
+});
 test('every literal UI binding has a unique markup target',()=>{const html=fs.readFileSync(__dirname+'/dist/index.html','utf8'),ids=[...html.matchAll(/\bid="([^"]+)"/g)].map(match=>match[1]);assert.equal(new Set(ids).size,ids.length);for(const match of source.matchAll(/\$\('([^']+)'\)/g))assert.ok(ids.includes(match[1]),'Missing markup target '+match[1]);});
 test('client news fallback expires sources individually without advancing timestamps',()=>{const now=Date.now(),ctx=vm.createContext({Date,Set});vm.runInContext(extract('function retainNewsSources(','async function refreshNews('),ctx);const data={fetchedAt:new Date(now-1000).toISOString(),sources:[{id:'fresh',fetchedAt:new Date(now-1000).toISOString()},{id:'old',fetchedAt:new Date(now-86400001).toISOString()}],items:[{sourceId:'fresh'},{sourceId:'old'}]};const result=ctx.newsFallback(data,'offline',now);assert.equal(result.items.length,1);assert.equal(result.items[0].sourceId,'fresh');assert.equal(result.sources[1].status,'error');assert.equal(result.fetchedAt,data.fetchedAt);});
 test('news fallback preserves original freshness and expires after 24 hours',()=>{const now=Date.now(),ctx=vm.createContext({Date});vm.runInContext(extract('function retainNewsSources(','async function refreshNews('),ctx);const previous={items:[{title:'fixture'}],sources:[{status:'ok'}],fetchedAt:new Date(now-10000).toISOString(),stale:false};const result=ctx.newsFallback(previous,'offline',now);assert.equal(result.stale,true);assert.equal(result.sources[0].status,'stale');assert.equal(result.fetchedAt,previous.fetchedAt);assert.equal(previous.stale,false);assert.equal(ctx.newsFallback(previous,'offline',now+86400000).items.length,0);assert.equal(ctx.newsFallback({...previous,fetchedAt:'bad'},'offline',now).items.length,0);});
