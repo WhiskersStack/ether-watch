@@ -1,36 +1,158 @@
 # Ether Watch
 
-Ethereum dashboard with a dependency-free Sites Worker and a managed D1 monitor table. Editable frontend sources remain in `dist/`; `node build-worker.cjs` embeds them in `dist/server/index.js` for deployment.
+**Ethereum market intelligence, minus the noise.**
 
-- Coinbase Exchange ETH-USD ticker and 24-hour stats poll every 15 seconds. The visible selected chart refreshes every 60 seconds with shared requests, failure backoff and separate stale status; daily overview indicators refresh every 5 minutes. Failed requests retain the last successful values and timestamps.
-- Initial levels: S1 2416, S2 2373, S3 2320; R1 2554, R2 2683, R3 2813 USD. Edit levels, rule mode and cooldown with the settings dialog. Valid saved settings persist in D1 and update all chart/metric consumers. 2510 is a reference, never a fabricated live quote.
-- Alerts default to strict S1/R1 boundaries; select any nonempty subset of the six saved levels. Preserve initial notices, persistent deduplication, reentry, and cooldown. Choose immediate breach, completed UTC daily close, or a daily retest within +/-0.25% during the next five completed daily candles. Optional approach warnings default to 0.5% and establish a silent baseline; warning and breach cooldowns are independent. Optional daily volume confirmation requires the qualifying completed candle to reach 1.5 times the preceding 20 contiguous completed daily volumes. Immediate alerts and approach warnings remain price-only. Missing/stale/invalid data cannot qualify the affected rule. Saving a real settings change cancels obsolete pending reports while preserving history.
-- Browser notifications require permission and an open, connected page. Scheduled Codex checks remain PAUSED and Site background checking remains disabled until an explicit request to resume. The dashboard distinguishes paused checks from missing setup and shows last checks/failures. Brief breaches between samples can be missed.
-- Chart controls offer 15-minute, hourly and daily intervals, candles or a closing-price line, 30/90/180 bars, linear/log scales, watch-level or visible-candle fitting, and an expanded dialog reusing the same chart. Optional EMA 20/50, RSI14 and MACD12/26/9 panes use completed candles in the selected interval, with warmup restarting across gaps. Volume/profile, levels, daily flips and news markers are independently selectable. Scroll or +/- zooms, horizontal dragging or arrow keys pans, and Reset/Home returns to the latest bars. Vertical touch gestures remain available for page scrolling. Preferences stay browser-local.
-- Chart interval, style, bar count and overlay preferences are saved only in this browser's local storage; they do not change saved alert rules. EMA overlays use the selected chart interval. RSI uses Wilder smoothing, MACD uses seeded EMA 12/26 and signal 9. Both summary indicators continue to use completed daily candles regardless of the chart interval. Relative volume compares the most recent completed daily candle against the preceding 20 candles.
-- Volume profile estimates volume-at-price by distributing each visible candle's ETH volume uniformly through its high-low range. The profile and point of control follow the visible chart window. Flip dots mark completed daily closes crossing reference levels, without retest confirmation; they are available only on the daily chart and require price levels to be visible.
-- Market updates use the same four publisher feeds through owner-private `/api/news`. Keep up to 32 eligible headlines per source (128 total) within 30 days, deduplicated before browser filtering and six-at-a-time pagination. Filters support source, literal search, and overlapping Ethereum/crypto, macro, network, ETF, regulation and security topics. Source caps/freshness/failures remain visible. Cards link to publisher HTTPS pages; article bodies are not copied. Optional chart markers group publication times inside actual candles. View on chart offers an explicit daily switch for unavailable intraday history; marker choices link to accessible story cards. Timing and categories do not prove causation or predict price moves.
-- Owner-private `/api/calendar` reads official BLS CPI, BEA Personal Income and Outlays/PCE, Federal Reserve FOMC, and Ethereum protocol/roadmap sources. Upcoming events cover 30 days; undated roadmap targets remain unconfirmed with no countdown. Display Asia/Jerusalem or UTC; FOMC meetings remain date-only unless an exact official time is verified. Cache sources for six hours, retain labeled fallback for at most 24 hours, and refresh the visible calendar hourly/manual/on return. Exact countdowns stop when verification is stale. Unknown formats/failures are visible; calendar entries never create notifications.
-- Alert history retains up to 200 server events, with 50 cached locally. Filter level/type/delivery and expand saved evaluation evidence; missing historical fields say Not recorded. Up to 200 rule-decision transitions are kept separately from notifications. Reported means acknowledged by Codex, not proof of operating-system delivery or readership. The existing JSON record and optimistic concurrency are preserved, with no SQL migration. Old client saves preserve omitted advanced settings; default-state migration creates no replay.
-- News refreshes every 5 minutes, on returning to the page and through Refresh news. Where the edge cache is available, each source is reused for 5 minutes; a failed source can retain clearly labeled cached headlines for up to 24 hours from its original retrieval. Source failures remain visible alongside working sources, and retrieval dates are not advanced by cache reads. A browser connection failure can retain the last response for the same 24-hour limit. Expired or unavailable news shows an explicit unavailable state; no generated headlines fill gaps.
-- Network failures display unavailable/stale state; no mock or generated market prices are used.
+Ether Watch is a responsive ETH/USD dashboard that combines live market data, interactive technical analysis, configurable support and resistance alerts, relevant news, and an official-events calendar in one focused workspace.
 
-## Manual verification
+**Status:** Actively in development. Features and data-source availability may change.
 
-1. Use the deployed Site or the loopback Worker preview; verify price, daily candles, and timestamps load from Coinbase. Exchange access and browser CORS policy must permit requests. Serving `dist/` alone does not provide the saved-settings or news API routes.
-2. Select 15m/1h/1D intervals and 30/90/180 bars; test candle/line style, linear/log scale, overlay toggles, hover, zoom, pan and reset. Reload to verify browser-local chart preferences, and confirm that summary indicators remain daily. Verify responsive display at desktop and mobile sizes.
-3. Edit levels and modes, verify validation, Save/Cancel/Reset, reload persistence, and pause/resume. Initial activation outside the range creates one notice; continuous breaches do not repeat.
-4. Disable network access and wait for a refresh. Verify stale/unavailable labeling and retention of prior values. Reconnect and verify recovery.
-5. Verify news source links, publisher timestamps, retrieval dates, topic filters and Refresh news. Check partial-source failure, labeled cached fallback, recovery and expiry after 24 hours; loading and failure status should remain clear when changing filters.
+[Live application](https://etherwatch.app) · [Source code](https://github.com/WhiskersStack/ether-watch)
 
-Run `node check.cjs` and `node --test chart.test.mjs news.test.mjs market-data.test.mjs calendar.test.mjs calendar-ui.test.mjs rules.test.mjs worker.test.mjs ui-state.test.cjs`. `node build-worker.cjs` embeds sources into ignored deployment output. `local-worker-preview.mjs` is loopback-only with temporary in-memory storage and a test identity; it is never deployed.
+> The hosted application is configured for owner-only access. The link may require authorization; the source is available in this repository.
 
-## Release record · 2026-10-17
+## What it does
 
-Stages 2-4 were published separately as saved versions 5, 6, and 7. Production is version 7, source `21e2cbf78aa29b8a27abfbf98638eb5d902d81e3`. The user accepted publication with physical touch explicitly unverified. Desktop 1280x900 and mobile viewport 390x844 checks are recorded in `UPGRADE-INSTRUCTIONS.md`; viewport checks do not establish physical touch behavior.
+### Live Ethereum overview
 
-The refreshed source snapshots pass 65 Stage 2 tests, 103 Stage 3 tests, and 138 Stage 4 tests; all Workers rebuild. The only runtime difference from the deployed saved versions is the local single-column `#level-list` fix below 480px, verified at 390px. That phone fix remains unpublished because automatic approval review rejected the official helper's hidden repository-credential handoff even after explicit user approval. No source push completed. Direct deployment of matching existing saved archives provided the feature rollout without that credential handoff. Keep using this primary checkout for the pending fix; temporary Stage 2 release copies are not the latest application source.
+- Displays the Coinbase Exchange **ETH-USD** spot ticker, 24-hour change, and volume.
+- Refreshes the ticker and overview in the browser, with distinct timestamps for chart and daily-indicator data.
+- Shows the current price relative to editable support and resistance levels.
+- Preserves the last successful data during a feed interruption while clearly marking stale or unavailable values. It does **not** substitute simulated prices.
 
-After every release, authenticated live review confirmed disabled Site background checking, the Codex automation file read `PAUSED`, and Sites confirmed sole-owner access with no cloud schedules. Final live smoke checks covered chart expansion, publication-time selection, alert controls and preserved settings; the browser console had no warnings/errors. BLS/CPI was unavailable while BEA, Federal Reserve, and Ethereum calendar sources were verified; the source health UI discloses that limitation. Saved version 4 and its archive remain available for rollback. Review rule/state compatibility before any later request to resume checks.
+### Interactive technical analysis
 
-See `MONITOR-RUNBOOK.md` for unattended operation. Source publication uses the Sites helper, preserving the same owner-only custom policy. D1 schema is declared in `drizzle/`; handlers never create or alter tables.
+- Switch between **15-minute, 1-hour, and 1-day** candles.
+- Choose candlesticks or a closing-price line, 30/90/180 visible bars, linear/logarithmic scale, and different chart-fitting modes.
+- Zoom, pan, reset, and expand the chart for closer inspection.
+- Toggle **EMA 20/50**, **RSI 14**, **MACD 12/26/9**, volume, and price-level overlays.
+- Explore completed-daily-candle crossing markers and an **estimated volume profile** with a point of control.
+- Overlay eligible news headlines at their publication times on candles when chart history is available.
+
+The volume profile is an estimate derived from candle high/low ranges and volume, **not** exchange trade-by-trade volume-at-price data. The overview's momentum and relative-volume indicators use completed daily candles, independently of the selected chart interval.
+
+### Customizable price-level alerts
+
+Configure six ordered support/resistance levels (**S1–S3** and **R1–R3**) and select which levels to monitor.
+
+| Rule | Trigger |
+| --- | --- |
+| Immediate breach | A fresh price moves strictly beyond a selected level. |
+| Daily close | A completed UTC daily candle closes across a selected level. |
+| Daily retest | A qualifying daily breakout is followed by a confirmed retest within the configured candle window. |
+
+Additional controls include:
+
+- Editable cooldowns and reentry-based deduplication.
+- Optional proximity warnings before a level is breached.
+- Optional relative-volume confirmation for completed-candle rules.
+- Pause/resume controls, settings validation, and persisted rule revisions.
+- Filterable alert history and a separate log of evaluation decisions, including available evidence and delivery state.
+
+Saved alert rules and monitoring state live in **D1**. Chart appearance preferences remain in the browser's local storage.
+
+### News and market catalysts
+
+- Reads relevant headlines from the **Ethereum Foundation**, **CoinDesk**, **Decrypt**, and the **Federal Reserve**.
+- Filters by source, topic, or headline search; links to the original publisher rather than reproducing full articles.
+- Presents publication times, source health, and clearly identified cached results during temporary feed failures.
+- Displays upcoming macroeconomic and Ethereum events from official **BLS**, **BEA**, **Federal Reserve**, and **Ethereum** sources.
+- Supports **UTC** and **Asia/Jerusalem** calendar display, with unconfirmed or undated events labeled accordingly.
+
+News categorization and chart markers provide context; they do **not** establish that a headline caused a price movement.
+
+## Technology
+
+| Layer | Implementation |
+| --- | --- |
+| Frontend | HTML5, CSS3, vanilla JavaScript (ES modules), Canvas |
+| Market data | Coinbase Exchange REST endpoints |
+| Backend | Dependency-free JavaScript Sites Worker |
+| Persistence | Managed D1 database, single monitor record with optimistic updates |
+| News / calendar | RSS/Atom feeds and official publisher or agency pages |
+| Build and tests | Node.js built-ins and Node's test runner |
+
+There is **no npm dependency installation** or frontend framework required.
+
+## Run locally
+
+**Requirements:** Git and a modern Node.js version with built-in `node:sqlite` support (Node.js 22.13+ recommended). Network access is needed to retrieve live market feeds and source updates.
+
+1. Clone the repository:
+
+   ```bash
+   git clone https://github.com/WhiskersStack/ether-watch.git
+   cd ether-watch
+   ```
+
+2. Start the full Worker preview:
+
+   ```bash
+   node local-worker-preview.mjs
+   ```
+
+3. Open **http://127.0.0.1:4174**.
+
+The local preview listens only on loopback, uses a **temporary in-memory SQLite database**, and supplies a **development-only test identity**. Settings and history reset when the process exits. It is not a production authentication system or a public deployment target.
+
+### Build the deployment bundle
+
+```bash
+node build-worker.cjs
+```
+
+This embeds the editable frontend sources and Worker modules into `dist/server/index.js`, alongside a generated hosting manifest. The generated output is ignored by Git. **Building does not deploy or publish** the application; hosting requires the appropriate managed Sites/D1 configuration and access policy.
+
+### Run checks and tests
+
+```bash
+node check.cjs
+node --test chart.test.mjs news.test.mjs market-data.test.mjs calendar.test.mjs calendar-ui.test.mjs rules.test.mjs worker.test.mjs ui-state.test.cjs
+```
+
+Tests cover chart calculations, market-data validation, news/calendar parsing, alert evaluation, Worker endpoints, and UI state. They can use controlled fixtures rather than modifying production settings.
+
+## Repository structure
+
+```text
+dist/
+  index.html           Dashboard markup
+  style.css            Responsive styling
+  app.js               Frontend state, views, and API calls
+  chart.mjs            Chart drawing and technical indicators
+  market-data.mjs      Coinbase candle retrieval and caching
+  rules.mjs            Alert configuration and evaluation
+  calendar-ui.mjs      Events calendar UI
+
+worker/
+  index.js             Authenticated application routes and D1 state
+  news.js              News ingestion, validation, and caching
+  calendar.js          Official-event ingestion and validation
+
+drizzle/0000_monitor.sql  Database schema
+.openai/hosting.json    Managed hosting manifest
+build-worker.cjs        Dependency-free production bundle builder
+local-worker-preview.mjs Local Worker + in-memory database preview
+*.test.mjs / *.test.cjs Automated tests
+MONITOR-RUNBOOK.md      Operational monitoring guidance
+UPGRADE-INSTRUCTIONS.md Upgrade and release history
+```
+
+## Monitoring and notification limitations
+
+**Unattended monitoring is not currently active.** The scheduled Codex checker is **paused**, and Site background checking is **disabled**. These settings should not be enabled as a side effect of deploying code or changing the README.
+
+- Browser notifications require browser permission and an **open, connected page**.
+- Closed-page notifications require a separate, explicitly authorized and functioning monitor; the Worker/D1 code alone does not schedule one.
+- Polling may miss a brief crossing that occurs between samples.
+- An event marked as acknowledged/reported is not proof that a device notification was delivered or read.
+- Market, news, and calendar sources may fail or temporarily become unavailable; the UI surfaces those conditions.
+
+See [MONITOR-RUNBOOK.md](MONITOR-RUNBOOK.md) for operational details.
+
+## Project direction
+
+Ether Watch remains a work in progress. Current priorities are refining the mobile experience, strengthening feed and alert reliability, and improving the clarity of chart and event interactions—while preserving private access and explicit control over monitoring.
+
+---
+
+Built by [WhiskersStack](https://github.com/WhiskersStack). Educational market analysis only; **not financial advice or a trading service**.
