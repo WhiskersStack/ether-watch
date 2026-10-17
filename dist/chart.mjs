@@ -1,6 +1,7 @@
 export const DEFAULT_CHART_OPTIONS = Object.freeze({
   type: 'candles', ema: false, volume: true, profile: true,
   levels: true, flips: true, scale: 'linear', bars: 90,
+  fit: 'levels', rsi: false, macd: false,
 });
 
 const DAY = 86400;
@@ -44,6 +45,80 @@ export function calculateEMA(values, period) {
     result[index] = value;
   }
   return result;
+}
+
+export function calculateRSI(values, period = 14) {
+  const result = Array(values.length).fill(null);
+  if (!Number.isInteger(period) || period < 1 || values.length <= period || !values.every(Number.isFinite)) return result;
+  let gain = 0, loss = 0;
+  for (let index = 1; index <= period; index++) {
+    const change = values[index] - values[index - 1];
+    gain += Math.max(change, 0) / period;
+    loss += Math.max(-change, 0) / period;
+  }
+  const strength = () => loss === 0 ? (gain === 0 ? 50 : 100) : 100 - 100 / (1 + gain / loss);
+  result[period] = strength();
+  for (let index = period + 1; index < values.length; index++) {
+    const change = values[index] - values[index - 1];
+    gain = (gain * (period - 1) + Math.max(change, 0)) / period;
+    loss = (loss * (period - 1) + Math.max(-change, 0)) / period;
+    result[index] = strength();
+  }
+  return result;
+}
+
+export function calculateMACD(values, fastPeriod = 12, slowPeriod = 26, signalPeriod = 9) {
+  const macd = Array(values.length).fill(null), signal = [...macd], histogram = [...macd];
+  if (![fastPeriod, slowPeriod, signalPeriod].every(period => Number.isInteger(period) && period > 0) || fastPeriod >= slowPeriod || !values.every(Number.isFinite)) return { macd, signal, histogram };
+  const fast = calculateEMA(values, fastPeriod), slow = calculateEMA(values, slowPeriod);
+  const valid = [];
+  for (let index = 0; index < values.length; index++) {
+    if (fast[index] === null || slow[index] === null) continue;
+    macd[index] = fast[index] - slow[index];
+    valid.push(index);
+  }
+  const signalValues = calculateEMA(valid.map(index => macd[index]), signalPeriod);
+  valid.forEach((index, position) => {
+    signal[index] = signalValues[position];
+    if (signal[index] !== null) histogram[index] = macd[index] - signal[index];
+  });
+  return { macd, signal, histogram };
+}
+
+export function calculateChartIndicators(candles, granularity = DAY, now = Date.now()) {
+  const result = Object.fromEntries(['rsi', 'macd', 'signal', 'histogram'].map(key => [key, Array(candles.length).fill(null)]));
+  if (!Number.isInteger(granularity) || granularity <= 0 || !Number.isFinite(now)) return result;
+  let segment = [];
+  const finish = () => {
+    if (!segment.length) return;
+    const closes = segment.map(index => candles[index].close);
+    const values = { rsi: calculateRSI(closes), ...calculateMACD(closes) };
+    for (const key of Object.keys(result)) segment.forEach((index, position) => { result[key][index] = values[key][position]; });
+    segment = [];
+  };
+  candles.forEach((candle, index) => {
+    if (!Number.isFinite(candle?.time) || !Number.isFinite(candle.close) || candle.close <= 0 || candle.time + granularity > now / 1000) { finish(); return; }
+    if (segment.length && candle.time - candles[segment.at(-1)].time !== granularity) finish();
+    segment.push(index);
+  });
+  finish();
+  return result;
+}
+
+export function calculatePriceBounds(candles, { levels = [], price = null, emaValues = [], fit = 'levels', atLatest = true } = {}) {
+  const values = candles.flatMap(candle => [candle.low, candle.high]).filter(value => Number.isFinite(value) && value > 0);
+  if (!values.length) return null;
+  values.push(...emaValues.filter(value => Number.isFinite(value) && value > 0));
+  if (fit === 'levels') {
+    values.push(...levels.map(level => level.price).filter(value => Number.isFinite(value) && value > 0));
+    if (atLatest && Number.isFinite(price) && price > 0) values.push(price);
+  }
+  const low = Math.min(...values), high = Math.max(...values), span = high - low || high * 0.02;
+  const min = Math.max(Number.MIN_VALUE, low * 0.95, low - span * 0.035);
+  const paddedMax = high + span * 0.035;
+  let max = Number.isFinite(paddedMax) ? paddedMax : high;
+  if (max <= min) max = Math.max(high * 1.01, Number.MIN_VALUE * 2);
+  return { min, max };
 }
 
 export function estimateVolumeProfile(candles, bins = 30) {
@@ -103,9 +178,10 @@ export function layoutAxisLabels(labels, top, bottom, requestedGap = 14) {
 export function normalizeChartOptions(input = {}, previous = DEFAULT_CHART_OPTIONS) {
   if (!input || typeof input !== 'object') input = {};
   const options = { ...previous };
-  for (const key of ['ema', 'volume', 'profile', 'levels', 'flips']) if (typeof input[key] === 'boolean') options[key] = input[key];
+  for (const key of ['ema', 'volume', 'profile', 'levels', 'flips', 'rsi', 'macd']) if (typeof input[key] === 'boolean') options[key] = input[key];
   if (['candles', 'line'].includes(input.type)) options.type = input.type;
   if (['linear', 'log'].includes(input.scale)) options.scale = input.scale;
+  if (['levels', 'candles'].includes(input.fit)) options.fit = input.fit;
   if (Number.isFinite(input.bars)) options.bars = clamp(Math.round(input.bars), 20, 300);
   return options;
 }
@@ -130,20 +206,30 @@ export class PriceChart {
     this.geometry = null;
     this.hover = null;
     this.drag = null;
+    this.pendingTouch = null;
+    this.touchPointers = new Set();
     this.destroyed = false;
     this.listeners = [];
     this.originalTouchAction = canvas.style.touchAction;
     this.originalCursor = canvas.style.cursor;
-    canvas.style.touchAction = 'none';
+    canvas.style.touchAction = 'pan-y pinch-zoom';
     canvas.style.cursor = 'crosshair';
     if (canvas.tabIndex < 0) canvas.tabIndex = 0;
     if (tooltip) { tooltip.hidden = true; tooltip.style.whiteSpace = 'pre-line'; }
     this.listen('pointermove', event => this.pointerMove(event));
-    this.listen('pointerleave', () => { if (!this.drag) this.clearHover(); });
+    this.listen('pointerleave', event => {
+      if (this.drag) return;
+      this.touchPointers.delete(event.pointerId);
+      this.pendingTouch = null;
+      this.clearHover();
+    });
     this.listen('pointerdown', event => this.pointerDown(event));
     this.listen('pointerup', event => this.pointerUp(event));
-    this.listen('pointercancel', event => this.pointerUp(event));
-    this.listen('lostpointercapture', () => { this.drag = null; canvas.style.cursor = 'crosshair'; });
+    this.listen('pointercancel', event => this.pointerCancel(event));
+    this.listen('lostpointercapture', () => {
+      if (this.drag) this.touchPointers.delete(this.drag.pointerId);
+      this.drag = null; this.pendingTouch = null; canvas.style.cursor = 'crosshair';
+    });
     this.listen('wheel', event => this.wheel(event), { passive: false });
     this.listen('keydown', event => this.keyDown(event));
     if (typeof ResizeObserver !== 'undefined') {
@@ -161,17 +247,23 @@ export class PriceChart {
     this.listeners.push({ type, handler, options });
   }
 
+  get extraPaneHeight() { return (this.options.rsi ? 110 : 0) + (this.options.macd ? 120 : 0); }
+
+  get desiredChartHeight() { return 360 + this.extraPaneHeight; }
+
   setData(candles, { price = null, levels = [], granularity = this.granularity } = {}) {
     const previousLength = this.candles.length;
     const wasLatest = this.viewEnd >= previousLength;
     const endTime = this.candles[this.viewport.end - 1]?.time;
     const changedTimeframe = granularity !== this.granularity;
+    if (changedTimeframe || !candles?.length) { this.cancelGesture(); this.touchPointers.clear(); }
     this.granularity = Number.isInteger(granularity) && granularity > 0 ? granularity : DAY;
     this.candles = normalizeChartCandles(candles, this.granularity);
     this.price = Number.isFinite(price) && price > 0 ? price : null;
     this.levels = Array.isArray(levels) ? levels.filter(level => typeof level?.code === 'string' && Number.isFinite(level.price) && level.price > 0).map(level => ({ code: level.code, price: level.price })) : [];
     this.ema20 = calculateEMA(this.candles.map(candle => candle.close), 20);
     this.ema50 = calculateEMA(this.candles.map(candle => candle.close), 50);
+    this.indicators = calculateChartIndicators(this.candles, this.granularity);
     if (changedTimeframe || wasLatest || !previousLength) {
       this.viewEnd = this.candles.length;
       if (changedTimeframe) this.viewBars = this.options.bars;
@@ -213,9 +305,17 @@ export class PriceChart {
   }
 
   pointerDown(event) {
-    if (!this.geometry || (event.button !== undefined && event.button !== 0)) return;
+    if (event.pointerType === 'touch') {
+      this.touchPointers.add(event.pointerId);
+      if (this.touchPointers.size > 1) { this.cancelGesture(); this.clearHover(); return; }
+    }
+    if (!this.geometry || (event.button !== undefined && event.button !== 0)) { this.touchPointers.delete(event.pointerId); return; }
     const point = this.point(event), g = this.geometry;
-    if (point.x < g.left || point.x > g.right || point.y < g.top || point.y > g.volumeBottom) return;
+    if (point.x < g.left || point.x > g.right || point.y < g.top || point.y > g.contentBottom) { this.touchPointers.delete(event.pointerId); return; }
+    if (event.pointerType === 'touch') {
+      this.pendingTouch = { pointerId: event.pointerId, x: point.x, y: point.y, end: this.viewport.end, step: g.step };
+      return;
+    }
     event.preventDefault();
     this.canvas.focus?.({ preventScroll: true });
     this.drag = { pointerId: event.pointerId, x: point.x, end: this.viewport.end, step: g.step };
@@ -226,24 +326,53 @@ export class PriceChart {
   pointerMove(event) {
     if (!this.geometry) return;
     const point = this.point(event);
+    if (event.pointerType === 'touch') {
+      if (this.touchPointers.size > 1) return;
+      if (this.pendingTouch?.pointerId === event.pointerId) {
+        const dx = Math.abs(point.x - this.pendingTouch.x), dy = Math.abs(point.y - this.pendingTouch.y);
+        if (dy > 8 && dy >= dx / 1.25) { this.pendingTouch = null; return; }
+        if (dx <= 8 || dx <= dy * 1.25) return;
+        this.drag = this.pendingTouch;
+        this.pendingTouch = null;
+        this.canvas.setPointerCapture?.(event.pointerId);
+        this.canvas.style.cursor = 'grabbing';
+        this.canvas.focus?.({ preventScroll: true });
+      }
+      if (!this.drag) return;
+    }
     if (this.drag && event.pointerId === this.drag.pointerId) {
+      event.preventDefault();
       this.viewEnd = this.drag.end - (point.x - this.drag.x) / this.drag.step;
       this.hover = null;
       this.render();
       return;
     }
     const g = this.geometry;
-    if (point.x < g.left || point.x > g.right || point.y < g.top || point.y > g.volumeBottom) { this.clearHover(); return; }
+    if (point.x < g.left || point.x > g.right || point.y < g.top || point.y > g.contentBottom) { this.clearHover(); return; }
     this.hover = { index: clamp(Math.floor((point.x - g.left) / g.step), 0, this.viewport.bars - 1), y: point.y };
     this.render();
   }
 
   pointerUp(event) {
-    if (!this.drag || event.pointerId !== this.drag.pointerId) return;
+    const touch = event.pointerType === 'touch' || this.touchPointers.has(event.pointerId);
+    this.touchPointers.delete(event.pointerId);
+    if (event.pointerId !== this.drag?.pointerId && event.pointerId !== this.pendingTouch?.pointerId) return;
+    this.cancelGesture();
+    if (touch) this.clearHover(); else this.pointerMove(event);
+  }
+
+  pointerCancel(event) {
+    this.touchPointers.delete(event.pointerId);
+    if (event.pointerId === this.drag?.pointerId || event.pointerId === this.pendingTouch?.pointerId) this.cancelGesture();
+    this.clearHover();
+  }
+
+  cancelGesture() {
+    const pointerId = this.drag?.pointerId;
     this.drag = null;
-    if (this.canvas.hasPointerCapture?.(event.pointerId)) this.canvas.releasePointerCapture?.(event.pointerId);
+    this.pendingTouch = null;
+    if (pointerId !== undefined && this.canvas.hasPointerCapture?.(pointerId)) this.canvas.releasePointerCapture?.(pointerId);
     this.canvas.style.cursor = 'crosshair';
-    this.pointerMove(event);
   }
 
   zoom(factor, anchor = 0.5) {
@@ -299,22 +428,19 @@ export class PriceChart {
     const data = this.candles.slice(this.viewport.start, this.viewport.end);
     if (!data.length || w < 140 || h < 120) { if (this.tooltip) this.tooltip.hidden = true; this.hover = null; this.onProfile(null); return; }
     const left = 10, right = w - (w < 420 ? 84 : 102), top = 18;
-    const bottom = h - (this.options.volume ? 76 : 32), volumeBottom = h - 26;
+    const bottom = h - (this.options.volume ? 76 : 32) - this.extraPaneHeight, volumeBottom = h - 26 - this.extraPaneHeight;
+    if (bottom < top + 40) { this.hover = null; if (this.tooltip) this.tooltip.hidden = true; return; }
     const step = (right - left) / data.length, x = index => left + (index + 0.5) * step;
     const visibleLevels = this.options.levels ? this.levels : [];
-    const bounds = data.flatMap(candle => [candle.low, candle.high]);
-    bounds.push(...visibleLevels.map(level => level.price));
-    if (this.price) bounds.push(this.price);
-    if (this.options.ema) for (const series of [this.ema20, this.ema50]) bounds.push(...series.slice(this.viewport.start, this.viewport.end).filter(Number.isFinite));
-    const low = Math.min(...bounds), high = Math.max(...bounds), span = high - low || high * 0.02;
-    const min = Math.max(low * 0.95, low - span * 0.035), max = high + span * 0.035;
+    const emaValues = this.options.ema ? [this.ema20, this.ema50].flatMap(series => series.slice(this.viewport.start, this.viewport.end)) : [];
+    const { min, max } = calculatePriceBounds(data, { levels: visibleLevels, price: this.price, emaValues, fit: this.options.fit, atLatest: this.viewport.end === this.candles.length });
     const transform = this.options.scale === 'log' ? Math.log : value => value;
     const inverse = this.options.scale === 'log' ? Math.exp : value => value;
     const minScale = transform(min), maxScale = transform(max);
     const y = price => top + (maxScale - transform(price)) / (maxScale - minScale) * (bottom - top);
     const valueAtY = py => inverse(maxScale - (py - top) / (bottom - top) * (maxScale - minScale));
-    this.geometry = { left, right, top, bottom, volumeBottom, step, x, y, valueAtY, min, max };
-    ctx.font = '10px DM Sans, sans-serif';
+    this.geometry = { left, right, top, bottom, volumeBottom, contentBottom: volumeBottom, step, x, y, valueAtY, min, max, panes: [] };
+    ctx.font = '11px DM Sans, sans-serif';
     ctx.textAlign = 'left';
     const labels = [];
     for (let index = 0; index < 5; index++) {
@@ -337,10 +463,14 @@ export class PriceChart {
     }
     for (const level of visibleLevels) {
       const support = level.code.startsWith('S'), py = y(level.price);
-      ctx.strokeStyle = support ? '#a9cb6566' : '#e78e8766';
-      ctx.setLineDash([4, 5]);
-      ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke();
-      labels.push({ desiredY: py, y: py, text: level.code + ' $' + formatAxis(level.price), color: support ? '#b5d58d' : '#d59b96', kind: 'level' });
+      const edge = py < top ? '↑ ' : py > bottom ? '↓ ' : '';
+      if (!edge) {
+        ctx.strokeStyle = support ? '#a9cb6566' : '#e78e8766';
+        ctx.setLineDash([4, 5]);
+        ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke();
+      }
+      const anchor = clamp(py, top, bottom);
+      labels.push({ desiredY: anchor, y: anchor, text: edge + level.code + ' $' + formatAxis(level.price), color: support ? '#b5d58d' : '#d59b96', kind: 'level' });
     }
     ctx.setLineDash([]);
     if (this.options.type === 'line') {
@@ -377,9 +507,13 @@ export class PriceChart {
     }
     if (this.price) {
       const py = y(this.price);
-      ctx.setLineDash([2, 3]); ctx.strokeStyle = '#edf0ed88';
-      ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke(); ctx.setLineDash([]);
-      labels.push({ desiredY: py, y: py, text: '$' + formatAxis(this.price), color: palette.text, kind: 'price' });
+      const edge = py < top ? '↑ Live ' : py > bottom ? '↓ Live ' : '';
+      if (!edge) {
+        ctx.setLineDash([2, 3]); ctx.strokeStyle = '#edf0ed88';
+        ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke(); ctx.setLineDash([]);
+      }
+      const anchor = clamp(py, top, bottom);
+      labels.push({ desiredY: anchor, y: anchor, text: edge + '$' + formatAxis(this.price), color: palette.text, kind: 'price' });
     }
     ctx.restore();
     if (this.options.volume) {
@@ -395,15 +529,16 @@ export class PriceChart {
     const annotations = layoutAxisLabels(labels.filter(label => label.kind !== 'tick'), top + 4, bottom - 3, labelGap);
     const visibleTicks = labels.filter(label => label.kind === 'tick' && annotations.every(annotation => Math.abs(label.y - annotation.y) >= labelGap));
     for (const label of [...visibleTicks, ...annotations]) {
-      ctx.font = (label.kind === 'tick' ? '9' : '10') + 'px DM Sans, sans-serif';
+      ctx.font = '11px DM Sans, sans-serif';
       ctx.fillStyle = label.color;
       if (label.kind !== 'tick') {
         ctx.strokeStyle = label.color + '88'; ctx.beginPath(); ctx.moveTo(right + 1, label.desiredY); ctx.lineTo(right + 5, label.y); ctx.stroke();
       }
       ctx.fillText(label.text, right + 8, label.y + 3);
     }
-    ctx.font = '9px DM Sans, sans-serif'; ctx.fillStyle = palette.muted;
-    const timeLabels = Math.max(2, Math.min(6, Math.floor((right - left) / 90)));
+    this.drawIndicators(data, h - this.extraPaneHeight - 18);
+    ctx.font = '11px DM Sans, sans-serif'; ctx.fillStyle = palette.muted;
+    const timeLabels = Math.max(2, Math.min(6, Math.floor((right - left) / 110)));
     const timeStep = Math.max(1, Math.ceil(data.length / timeLabels));
     for (let index = 0; index < data.length; index += timeStep) {
       const date = new Date(data[index].time * 1000);
@@ -416,15 +551,78 @@ export class PriceChart {
     this.drawHover(data);
   }
 
+  drawIndicators(data, start) {
+    const g = this.geometry, ctx = this.context;
+    const timeframe = this.granularity === DAY ? '1D' : this.granularity % 3600 === 0 ? this.granularity / 3600 + 'h' : this.granularity / 60 + 'm';
+    for (const key of ['rsi', 'macd']) {
+      if (!this.options[key]) continue;
+      const height = key === 'rsi' ? 110 : 120;
+      const series = key === 'rsi' ? [['rsi', '#92bee9']] : [['macd', palette.ema20], ['signal', palette.ema50]];
+      const values = (key === 'rsi' ? ['rsi'] : ['macd', 'signal', 'histogram']).flatMap(name => this.indicators[name].slice(this.viewport.start, this.viewport.end)).filter(Number.isFinite);
+      const limit = Math.max(0.01, ...values.map(Math.abs)) * 1.15;
+      const min = key === 'rsi' ? 0 : -limit, max = key === 'rsi' ? 100 : limit;
+      const top = start + 20, bottom = start + height - 12;
+      const y = value => top + (max - value) / (max - min) * (bottom - top);
+      const valueAtY = py => max - (py - top) / (bottom - top) * (max - min);
+      g.panes.push({ key, top, bottom, min, max, y, valueAtY });
+      g.contentBottom = bottom;
+      ctx.font = '11px DM Sans, sans-serif'; ctx.fillStyle = palette.muted;
+      ctx.strokeStyle = palette.grid; ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(g.left, start - 4); ctx.lineTo(g.right + 70, start - 4); ctx.stroke();
+      ctx.fillText((key === 'rsi' ? 'RSI 14' : 'MACD 12/26/9') + ' · ' + timeframe + ' · closed', g.left, start + 8);
+      const ticks = key === 'rsi' ? [0, 30, 70, 100] : [min, 0, max];
+      for (const value of ticks) {
+        const py = y(value);
+        ctx.strokeStyle = value === 0 && key === 'macd' ? '#606e73' : palette.grid;
+        ctx.setLineDash(key === 'rsi' && (value === 30 || value === 70) ? [3, 4] : []);
+        ctx.beginPath(); ctx.moveTo(g.left, py); ctx.lineTo(g.right, py); ctx.stroke();
+        ctx.fillStyle = palette.muted;
+        ctx.fillText(key === 'rsi' ? String(value) : value.toFixed(2), g.right + 8, py + 3);
+      }
+      ctx.setLineDash([]);
+      ctx.save(); ctx.beginPath(); ctx.rect(g.left, top, g.right - g.left, bottom - top); ctx.clip();
+      if (key === 'macd') {
+        this.indicators.histogram.slice(this.viewport.start, this.viewport.end).forEach((value, index) => {
+          if (!Number.isFinite(value)) return;
+          ctx.fillStyle = value >= 0 ? '#bce58a66' : '#d8878066';
+          const width = Math.max(1, Math.min(16, g.step * 0.6));
+          ctx.fillRect(g.x(index) - width / 2, Math.min(y(0), y(value)), width, Math.abs(y(value) - y(0)));
+        });
+      }
+      for (const [name, color] of series) {
+        let started = false;
+        ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+        this.indicators[name].slice(this.viewport.start, this.viewport.end).forEach((value, index) => {
+          if (!Number.isFinite(value)) { started = false; return; }
+          if (started) ctx.lineTo(g.x(index), y(value)); else { ctx.moveTo(g.x(index), y(value)); started = true; }
+        });
+        ctx.stroke();
+      }
+      ctx.lineWidth = 1;
+      if (!values.length) {
+        ctx.fillStyle = palette.muted;
+        ctx.fillText('Warming up · ' + (key === 'rsi' ? '15' : '34') + ' closes', g.left + 8, top + (bottom - top) / 2);
+      }
+      ctx.restore();
+      start += height;
+    }
+  }
+
   drawHover(data) {
     if (!this.hover || !this.geometry || !data[this.hover.index]) { if (this.tooltip) this.tooltip.hidden = true; return; }
     const { index, y: py } = this.hover, g = this.geometry, ctx = this.context, candle = data[index];
     ctx.setLineDash([3, 3]); ctx.strokeStyle = '#b2c0c599';
-    ctx.beginPath(); ctx.moveTo(g.x(index), g.top); ctx.lineTo(g.x(index), g.volumeBottom); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(g.x(index), g.top); ctx.lineTo(g.x(index), g.contentBottom); ctx.stroke();
     if (py >= g.top && py <= g.bottom) {
       ctx.beginPath(); ctx.moveTo(g.left, py); ctx.lineTo(g.right, py); ctx.stroke();
       ctx.fillStyle = '#edf0ed'; ctx.fillRect(g.right + 2, py - 10, this.canvas.getBoundingClientRect().width - g.right - 4, 19);
-      ctx.fillStyle = '#101315'; ctx.font = '10px DM Sans, sans-serif'; ctx.fillText(formatUSD(g.valueAtY(py)), g.right + 7, py + 3);
+      ctx.fillStyle = '#101315'; ctx.font = '11px DM Sans, sans-serif'; ctx.fillText(formatUSD(g.valueAtY(py)), g.right + 7, py + 3);
+    }
+    const pane = g.panes.find(candidate => py >= candidate.top && py <= candidate.bottom);
+    if (pane) {
+      ctx.beginPath(); ctx.moveTo(g.left, py); ctx.lineTo(g.right, py); ctx.stroke();
+      ctx.fillStyle = '#edf0ed'; ctx.fillRect(g.right + 2, py - 10, this.canvas.getBoundingClientRect().width - g.right - 4, 19);
+      ctx.fillStyle = '#101315'; ctx.font = '11px DM Sans, sans-serif'; ctx.fillText(pane.valueAtY(py).toFixed(2), g.right + 7, py + 3);
     }
     ctx.setLineDash([]);
     if (this.tooltip) {
@@ -432,12 +630,18 @@ export class PriceChart {
       const time = this.granularity === DAY ? stamp.slice(0, 10) : stamp.slice(0, 16).replace('T', ' ');
       const progress = candle.time + this.granularity > Date.now() / 1000 ? ' · In progress' : '';
       this.tooltip.textContent = `${time} UTC${progress}\nO ${formatUSD(candle.open)} · H ${formatUSD(candle.high)}\nL ${formatUSD(candle.low)} · C ${formatUSD(candle.close)}\nVolume ${candle.volume.toLocaleString('en-US', { maximumFractionDigits: 2 })} ETH`;
+      const position = this.viewport.start + index;
+      const indicatorValue = name => Number.isFinite(this.indicators[name][position]) ? this.indicators[name][position].toFixed(2) : '—';
+      if (this.options.rsi) this.tooltip.textContent += '\nRSI 14 (closed) ' + indicatorValue('rsi');
+      if (this.options.macd) this.tooltip.textContent += '\nMACD ' + indicatorValue('macd') + ' · Signal ' + indicatorValue('signal') + ' · Hist ' + indicatorValue('histogram');
       this.tooltip.hidden = false;
     }
   }
 
   destroy() {
     this.destroyed = true;
+    this.cancelGesture();
+    this.touchPointers.clear();
     for (const { type, handler, options } of this.listeners) this.canvas.removeEventListener(type, handler, options);
     this.resizeObserver?.disconnect();
     if (this.resizeHandler && typeof window !== 'undefined') window.removeEventListener('resize', this.resizeHandler);

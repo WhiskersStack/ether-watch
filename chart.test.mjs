@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PriceChart, normalizeChartCandles, viewportBounds, calculateEMA, estimateVolumeProfile, findDailyFlips, layoutAxisLabels, normalizeChartOptions, DEFAULT_CHART_OPTIONS } from './dist/chart.mjs';
+import { PriceChart, normalizeChartCandles, viewportBounds, calculateEMA, calculateRSI, calculateMACD, calculateChartIndicators, calculatePriceBounds, estimateVolumeProfile, findDailyFlips, layoutAxisLabels, normalizeChartOptions, DEFAULT_CHART_OPTIONS } from './dist/chart.mjs';
 
 const DAY = 86400;
 const START = Date.UTC(2026, 9, 14) / 1000;
@@ -41,6 +41,78 @@ test('EMA uses an SMA seed, preserves warmup and uses complete history', () => {
   assert.deepEqual(calculateEMA([1, 2, 3], 1), [1, 2, 3]);
 });
 
+test('RSI uses Wilder smoothing with aligned warmup and handles flat, rising and falling prices', () => {
+  assert.deepEqual(calculateRSI([100, 101, 100, 101, 100], 2), [null, null, 50, 75, 37.5]);
+  const rising = Array.from({ length: 20 }, (_, index) => index + 1);
+  assert.deepEqual(calculateRSI(rising).slice(0, 14), Array(14).fill(null));
+  assert.equal(calculateRSI(rising)[14], 100);
+  assert.equal(calculateRSI([...rising].reverse())[14], 0);
+  assert.equal(calculateRSI(Array(20).fill(2500))[14], 50);
+  assert.deepEqual(calculateRSI([1, 2], 14), [null, null]);
+  assert.deepEqual(calculateRSI([1, NaN, 3], 2), [null, null, null]);
+});
+
+test('MACD aligns both EMA and signal warmups without treating missing values as zero', () => {
+  const values = Array.from({ length: 40 }, (_, index) => index + 1);
+  const short = calculateMACD(values, 3, 5, 2);
+  assert.deepEqual(short.macd.slice(0, 4), Array(4).fill(null));
+  assert.equal(short.macd[4], 1);
+  assert.equal(short.signal[4], null);
+  assert.equal(short.signal[5], 1);
+  assert.equal(short.histogram[5], 0);
+  const standard = calculateMACD(values);
+  assert.equal(standard.macd.findIndex(Number.isFinite), 25);
+  assert.equal(standard.signal.findIndex(Number.isFinite), 33);
+  assert.equal(standard.histogram.findIndex(Number.isFinite), 33);
+  assert.ok(Math.abs(standard.macd[39] - 7) < 1e-10);
+  assert.ok(Math.abs(standard.histogram[39]) < 1e-10);
+  const flat = calculateMACD(Array(40).fill(2500));
+  assert.equal(flat.macd[39], 0);
+  assert.equal(flat.signal[39], 0);
+  assert.equal(flat.histogram[39], 0);
+  assert.deepEqual(calculateMACD([1, 2, 3], 5, 3, 2).macd, [null, null, null]);
+});
+
+test('selected-timeframe indicators exclude unfinished candles and restart warmup after missing intervals', () => {
+  for (const granularity of [900, 3600, DAY]) {
+    const first = Array.from({ length: 40 }, (_, index) => candle(START - (82 - index) * granularity, 2500 + index));
+    const second = Array.from({ length: 40 }, (_, index) => candle(START - (40 - index) * granularity, 2700 - index));
+    const data = [...first, ...second, candle(START, 10000)];
+    const indicators = calculateChartIndicators(data, granularity, START * 1000 + 1000);
+    for (const values of Object.values(indicators)) {
+      assert.equal(values.length, data.length);
+      assert.equal(values.at(-1), null, 'unfinished candle never enters the closed-candle series');
+    }
+    assert.equal(indicators.rsi[14], 100);
+    assert.ok(Number.isFinite(indicators.histogram[33]));
+    assert.deepEqual(indicators.rsi.slice(40, 54), Array(14).fill(null));
+    assert.equal(indicators.rsi[54], 0);
+    assert.deepEqual(indicators.macd.slice(40, 65), Array(25).fill(null));
+    assert.deepEqual(indicators.signal.slice(40, 73), Array(33).fill(null));
+    assert.ok(Number.isFinite(indicators.histogram[73]));
+  }
+});
+
+test('price fitting includes selected EMAs but excludes watch levels and live prices in candle mode', () => {
+  const data = [candle(START - DAY, 2500)];
+  const options = { levels: [{ price: 1000 }, { price: 5000 }], price: 10000 };
+  const inclusive = calculatePriceBounds(data, options);
+  assert.ok(inclusive.min <= 1000 && inclusive.max >= 10000);
+  const fitted = calculatePriceBounds(data, { ...options, fit: 'candles' });
+  assert.ok(fitted.min > 2400 && fitted.max < 2600);
+  const historical = calculatePriceBounds(data, { ...options, atLatest: false });
+  assert.ok(historical.max >= 5000 && historical.max < 10000, 'historical range excludes today’s live price');
+  const withEMA = calculatePriceBounds(data, { ...options, fit: 'candles', emaValues: [null, 3200, NaN] });
+  assert.ok(withEMA.max >= 3200 && withEMA.max < 5000);
+  for (const price of [0.01, 2500, Number.MIN_VALUE]) {
+    const flat = { time: START, low: price, high: price, open: price, close: price, volume: 0 };
+    const bounds = calculatePriceBounds([flat], { fit: 'candles' });
+    assert.ok(bounds.min > 0 && bounds.max > bounds.min);
+    assert.ok(Number.isFinite(Math.log(bounds.min)) && Number.isFinite(Math.log(bounds.max)));
+  }
+  assert.equal(calculatePriceBounds([]), null);
+});
+
 test('estimated profile conserves volume including flat candles and reports no POC for zero volume', () => {
   const data = [candle(START - DAY, 100, 100), { time: START, low: 100, high: 100, open: 100, close: 100, volume: 20 }];
   const profile = estimateVolumeProfile(data, 20);
@@ -78,20 +150,25 @@ test('display options restrict malformed stored values and copy defaults', () =>
   assert.equal(next.scale, 'log');
   assert.equal(next.ema, true);
   assert.equal(DEFAULT_CHART_OPTIONS.ema, false);
+  assert.equal(DEFAULT_CHART_OPTIONS.fit, 'levels');
+  assert.equal(DEFAULT_CHART_OPTIONS.rsi, false);
+  assert.equal(DEFAULT_CHART_OPTIONS.macd, false);
+  assert.equal(normalizeChartOptions({ fit: 'unsupported', rsi: 'true', macd: 1 }).fit, 'levels');
+  assert.equal(normalizeChartOptions({ fit: 'candles', rsi: true, macd: true }).fit, 'candles');
 });
 
-function fakeCanvas() {
-  const listeners = new Map(), calls = [];
+function fakeCanvas({ width = 700, height = 360 } = {}) {
+  const listeners = new Map(), calls = [], captures = new Set();
   const context = new Proxy({ measureText: text => ({ width: String(text).length * 5 }) }, { get: (target, key) => key in target ? target[key] : (...args) => calls.push({ key, args }), set: (target, key, value) => { target[key] = value; return true; } });
   const canvas = {
     style: { touchAction: '', cursor: '' }, tabIndex: -1, width: 0, height: 0,
-    getContext: () => context, getBoundingClientRect: () => ({ left: 0, top: 0, width: 700, height: 360 }),
+    getContext: () => context, getBoundingClientRect: () => ({ left: 0, top: 0, width, height }),
     addEventListener: (type, listener) => listeners.set(type, listener), removeEventListener: type => listeners.delete(type), focus() {},
-    setPointerCapture() {}, hasPointerCapture: () => false,
+    setPointerCapture: pointerId => captures.add(pointerId), hasPointerCapture: pointerId => captures.has(pointerId), releasePointerCapture: pointerId => captures.delete(pointerId),
   };
-  return { canvas, listeners, calls };
+  return { canvas, listeners, calls, captures };
 }
-const event = values => ({ preventDefault() {}, ...values });
+const event = values => ({ prevented: false, preventDefault() { this.prevented = true; }, ...values });
 
 test('numeric axis ticks stay aligned with their gridlines without annotations', () => {
   const { canvas, calls } = fakeCanvas(), chart = new PriceChart(canvas);
@@ -128,6 +205,79 @@ test('clustered annotations stay separated while crowded numeric ticks are omitt
     assert.equal(tick.args[2], gridTick.y + 3, 'collision handling never relocates a numeric tick');
     for (const annotationY of annotationYs) assert.ok(Math.abs(tick.args[2] - annotationY) >= 13 - 1e-8);
   }
+});
+
+test('fit and pane toggles preserve the viewport and expose offscreen levels and live price', () => {
+  const { canvas, calls } = fakeCanvas({ height: 590 }), errors = [];
+  const chart = new PriceChart(canvas, { onError: error => errors.push(error) });
+  chart.setData(rows(), { levels: [{ code: 'S1', price: 1000 }, { code: 'R1', price: 5000 }], price: 6000 }).setOptions({ bars: 30 });
+  chart.zoom(0.85);
+  chart.keyDown(event({ key: 'ArrowLeft' }));
+  const viewport = { ...chart.viewport };
+  calls.length = 0;
+  chart.setOptions({ fit: 'candles', rsi: true, macd: true, scale: 'log' });
+  assert.deepEqual(chart.viewport, viewport);
+  assert.ok(chart.geometry.min > 2400 && chart.geometry.max < 3000);
+  const edgeLabels = calls.filter(call => call.key === 'fillText' && /^[↑↓]/.test(call.args[0]));
+  assert.deepEqual(edgeLabels.map(call => call.args[0]).sort(), ['↑ Live $6,000', '↑ R1 $5,000', '↓ S1 $1,000'].sort());
+  for (const label of edgeLabels) assert.ok(label.args[2] >= chart.geometry.top && label.args[2] <= chart.geometry.bottom + 3);
+  assert.deepEqual(errors, []);
+});
+
+test('optional indicator panes use independent scales, full history and crosshair values', () => {
+  const { canvas } = fakeCanvas({ height: 590 }), tooltip = { hidden: true, style: {} }, errors = [];
+  const chart = new PriceChart(canvas, { tooltip, onError: error => errors.push(error) });
+  const data = Array.from({ length: 80 }, (_, index) => candle(START - (80 - index) * 3600, 2500 + index));
+  chart.setData(data, { granularity: 3600 }).setOptions({ bars: 30 });
+  const priceBounds = { min: chart.geometry.min, max: chart.geometry.max };
+  assert.equal(chart.extraPaneHeight, 0);
+  assert.equal(chart.desiredChartHeight, 360);
+  chart.setOptions({ rsi: true, macd: true });
+  assert.equal(chart.extraPaneHeight, 230);
+  assert.equal(chart.desiredChartHeight, 590);
+  assert.deepEqual({ min: chart.geometry.min, max: chart.geometry.max }, priceBounds);
+  assert.equal(chart.geometry.bottom, 284, 'expanded canvas retains the original price-panel height');
+  const [rsi, macd] = chart.geometry.panes;
+  assert.equal(rsi.key, 'rsi');
+  assert.equal(rsi.min, 0);
+  assert.equal(rsi.max, 100);
+  assert.equal(macd.key, 'macd');
+  assert.equal(macd.min, -macd.max);
+  assert.equal(macd.y(0), (macd.top + macd.bottom) / 2);
+  assert.ok(chart.geometry.volumeBottom < rsi.top && rsi.bottom < macd.top);
+  assert.ok(Number.isFinite(chart.indicators.histogram[chart.viewport.start]), 'warmup uses full history before slicing the viewport');
+  chart.pointerMove(event({ clientX: chart.geometry.x(29), clientY: rsi.y(50) }));
+  assert.equal(tooltip.hidden, false);
+  assert.match(tooltip.textContent, /RSI 14 \(closed\) 100\.00/);
+  assert.match(tooltip.textContent, /MACD 7\.00 · Signal 7\.00/);
+  chart.setOptions({ rsi: false, macd: false });
+  assert.deepEqual(chart.geometry.panes, []);
+  assert.equal(chart.extraPaneHeight, 0);
+  assert.deepEqual(errors, []);
+});
+
+test('indicator panes show warmup without invented values and handle flat zero-volume history', () => {
+  const { canvas, calls } = fakeCanvas({ height: 590 }), chart = new PriceChart(canvas);
+  chart.setData(rows(10)).setOptions({ rsi: true, macd: true });
+  const labels = calls.filter(call => call.key === 'fillText').map(call => call.args[0]);
+  assert.ok(labels.includes('Warming up · 15 closes'));
+  assert.ok(labels.includes('Warming up · 34 closes'));
+  chart.setData(rows(60).map(candle => ({ ...candle, low: 2500, high: 2500, open: 2500, close: 2500, volume: 0 })));
+  assert.equal(chart.indicators.rsi.at(-1), 50);
+  assert.equal(chart.indicators.histogram.at(-1), 0);
+  for (const pane of chart.geometry.panes) assert.ok(Number.isFinite(pane.y(0)));
+});
+
+test('historical views are not stretched by a new live price in the default fit mode', () => {
+  const { canvas, calls } = fakeCanvas(), chart = new PriceChart(canvas);
+  chart.setData(rows(), { price: 2600 }).setOptions({ bars: 30 });
+  chart.keyDown(event({ key: 'ArrowLeft' }));
+  const viewport = { ...chart.viewport }, maximum = chart.geometry.max;
+  calls.length = 0;
+  chart.setData(rows(), { price: 6000 });
+  assert.deepEqual(chart.viewport, viewport);
+  assert.equal(chart.geometry.max, maximum);
+  assert.ok(calls.some(call => call.key === 'fillText' && call.args[0] === '↑ Live $6,000'));
 });
 
 test('renderer updates data, emits visible profile and clears stale geometry/tooltip on empty input', () => {
@@ -196,5 +346,84 @@ test('dragging pans within history bounds and destroy removes interaction listen
   chart.destroy();
   assert.equal(listeners.size, 0);
   assert.equal(tooltip.hidden, true);
+  assert.equal(canvas.style.touchAction, '');
+});
+
+test('touch gestures leave vertical scrolling native and capture only clear horizontal intent', () => {
+  const { canvas, captures } = fakeCanvas(), chart = new PriceChart(canvas);
+  chart.setData(rows()).setOptions({ bars: 30 });
+  assert.equal(canvas.style.touchAction, 'pan-y pinch-zoom');
+  const viewport = { ...chart.viewport };
+  const down = event({ pointerType: 'touch', pointerId: 1, clientX: 250, clientY: 100 });
+  chart.pointerDown(down);
+  assert.equal(down.prevented, false);
+  assert.equal(captures.size, 0);
+  const vertical = event({ pointerType: 'touch', pointerId: 1, clientX: 254, clientY: 130 });
+  chart.pointerMove(vertical);
+  assert.equal(vertical.prevented, false);
+  assert.equal(chart.pendingTouch, null);
+  assert.equal(chart.drag, null);
+  assert.deepEqual(chart.viewport, viewport);
+  chart.pointerCancel(event({ pointerType: 'touch', pointerId: 1 }));
+  chart.pointerDown(event({ pointerType: 'touch', pointerId: 2, clientX: 250, clientY: 100 }));
+  const small = event({ pointerType: 'touch', pointerId: 2, clientX: 258, clientY: 100 });
+  chart.pointerMove(small);
+  assert.equal(captures.size, 0);
+  const horizontal = event({ pointerType: 'touch', pointerId: 2, clientX: 270, clientY: 101 });
+  chart.pointerMove(horizontal);
+  assert.equal(horizontal.prevented, true);
+  assert.equal(captures.has(2), true);
+  assert.ok(chart.viewport.end < viewport.end);
+  chart.pointerUp(event({ pointerType: 'touch', pointerId: 2, clientX: 270, clientY: 101 }));
+  assert.equal(chart.drag, null);
+  assert.equal(chart.pendingTouch, null);
+  assert.equal(captures.size, 0);
+  assert.equal(chart.touchPointers.size, 0);
+});
+
+test('multitouch, cancellation and lost capture cannot leave a chart drag stuck', () => {
+  const { canvas, listeners, captures } = fakeCanvas(), chart = new PriceChart(canvas);
+  chart.setData(rows()).setOptions({ bars: 30 });
+  const touch = (pointerId, clientX = 250) => event({ pointerType: 'touch', pointerId, clientX, clientY: 100 });
+  chart.pointerDown(touch(1)); chart.pointerMove(touch(1, 275));
+  assert.equal(captures.has(1), true);
+  chart.pointerDown(touch(2));
+  assert.equal(chart.drag, null);
+  assert.equal(captures.size, 0);
+  const viewport = { ...chart.viewport };
+  chart.pointerMove(touch(1, 400)); chart.pointerMove(touch(2, 400));
+  assert.deepEqual(chart.viewport, viewport);
+  chart.pointerUp(touch(1)); chart.pointerUp(touch(2));
+  assert.equal(chart.touchPointers.size, 0);
+  chart.pointerDown(touch(3)); chart.pointerMove(touch(3, 275));
+  chart.pointerCancel(touch(3));
+  assert.equal(chart.drag, null);
+  assert.equal(captures.size, 0);
+  assert.equal(chart.touchPointers.size, 0);
+  chart.pointerDown(touch(4)); chart.pointerMove(touch(4, 275));
+  captures.delete(4); listeners.get('lostpointercapture')(touch(4));
+  assert.equal(chart.drag, null);
+  assert.equal(chart.pendingTouch, null);
+  assert.equal(chart.touchPointers.size, 0);
+});
+
+test('leaving the canvas and changing intervals clear pending touch gestures', () => {
+  const { canvas, listeners, captures } = fakeCanvas(), chart = new PriceChart(canvas);
+  chart.setData(rows()).setOptions({ bars: 30 });
+  chart.pointerDown(event({ pointerType: 'touch', pointerId: 1, clientX: 699, clientY: 100 }));
+  assert.equal(chart.touchPointers.size, 0, 'axis touches do not create a pending chart gesture');
+  chart.pointerDown(event({ pointerType: 'touch', pointerId: 2, clientX: 250, clientY: 100 }));
+  listeners.get('pointerleave')(event({ pointerType: 'touch', pointerId: 2 }));
+  assert.equal(chart.pendingTouch, null);
+  assert.equal(chart.touchPointers.size, 0);
+  chart.pointerDown(event({ pointerType: 'touch', pointerId: 3, clientX: 250, clientY: 100 }));
+  chart.pointerMove(event({ pointerType: 'touch', pointerId: 3, clientX: 275, clientY: 101 }));
+  assert.equal(captures.size, 1);
+  chart.setData([], { granularity: 3600 });
+  assert.equal(captures.size, 0);
+  assert.equal(chart.drag, null);
+  assert.equal(chart.pendingTouch, null);
+  assert.equal(chart.touchPointers.size, 0);
+  chart.destroy();
   assert.equal(canvas.style.touchAction, '');
 });
