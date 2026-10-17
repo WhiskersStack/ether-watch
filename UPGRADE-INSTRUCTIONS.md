@@ -1,5 +1,11 @@
 # Ether Watch upgrade instructions
 
+## Current roadmap · 2026-10-17
+
+The user authorized all six follow-up upgrades in four stages: status/news clarity; expanded chart/fit/indicator/touch controls; news markers/official calendar; selected-level/proximity/daily-volume alerts and evidence history. Use the existing dependency-free Worker/D1 architecture and free public sources. The README documents current behavior and test commands; earlier sections below record the original October 14 architecture brief.
+
+Stage 1 is deployed. Later stages must remain saved candidates until desktop/mobile visual QA succeeds: browser security policy blocked preview access and the user explicitly retained that release gate. No browser-policy workaround or unverified publication is authorized. Keep the Site owner-private, the Codex automation PAUSED, and Site background checking disabled. Do not add another automation or enable schedule controls during validation. Test notification behavior with in-memory fixtures, not live settings changes.
+
 Prepared: 2026-10-14 (Asia/Jerusalem)
 Status: Verified brief. User selected Codex notifications and explicitly approved the Sites server/database addition. Implementation and deployment verification are in progress.
 

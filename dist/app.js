@@ -15,17 +15,82 @@ const newsState={data:null,busy:false,visible:6,selected:null};
 const candleFeed=createCandleFeed({fetcher:(url,options)=>fetch(url,{...options,signal:AbortSignal.timeout(12000)})});
 const newsTopics={ethereum:'Ethereum & crypto',macro:'Macro',network:'Network upgrades',etf:'ETFs',regulation:'Regulation',security:'Security'};
 try{legacyPaused=localStorage.getItem('etherwatch-armed')==='false'&&!localStorage.getItem('etherwatch-migrated');}catch{}
-const state = {price:null,candles:[],days:90,armed:true,events:[],lastSuccess:0,lastCandles:0,busy:false,chartData:[],stats:null,serverReady:false,seen:new Set(),bootstrapped:false,background:null,lastCheck:0};
+const state = {price:null,candles:[],days:90,armed:true,events:[],decisions:[],lastSuccess:0,lastCandles:0,busy:false,chartData:[],stats:null,serverReady:false,seen:new Set(),bootstrapped:false,background:null,lastCheck:0};
 const usd = n => Number.isFinite(n) ? n.toLocaleString('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
 const short = n => Number.isFinite(n) ? '$'+Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:2}).format(n) : '—';
 const escapeHTML = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 try {state.events=JSON.parse(localStorage.getItem('etherwatch-alerts')||'[]').filter(e=>e&&typeof e.message==='string'&&Number.isFinite(e.time)).slice(0,50);state.armed=localStorage.getItem('etherwatch-armed')!=='false';} catch {}
-function persist(){try{localStorage.setItem('etherwatch-alerts',JSON.stringify(state.events));localStorage.setItem('etherwatch-armed',String(state.armed));}catch{}}
+function persist(){try{localStorage.setItem('etherwatch-alerts',JSON.stringify(state.events.slice(0,50)));localStorage.setItem('etherwatch-armed',String(state.armed));}catch{}}
 function toast(message){$('toast').textContent=message;$('toast').style.display='block';clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').style.display='none',7000);}
-function renderEvents(){ $('alert-count').textContent=state.events.length; if(!state.events.length)return; $('alert-list').innerHTML=state.events.map(e=>`<div class="event">${escapeHTML(e.message)}<small>${escapeHTML(new Date(e.time).toLocaleString())}${e.delivery?' · '+escapeHTML({pending:'Awaiting Codex report',reported:'Reported by Codex',cancelled:'Cancelled after settings change'}[e.delivery]||e.delivery):' · Saved in this browser'}</small></div>`).join(''); }
+function validHistoryRecord(record){return record&&typeof record.message==='string'&&Number.isFinite(record.time);}
+function historyRecordId(record){return record.id||record.time+':'+record.message;}
+function historyLevel(record){return Object.hasOwn(levelNames,record.rule)?record.rule:'unrecorded';}
+function historyKind(record){return ['breach','proximity'].includes(record.kind)?record.kind:'unrecorded';}
+function historyDelivery(record){return record.delivery||'local';}
+function filterHistory(records,level,kind,delivery='all'){return records.filter(record=>(level==='all'||historyLevel(record)===level)&&(kind==='all'||historyKind(record)===kind)&&(delivery==='all'||historyDelivery(record)===delivery));}
+function mergeHistoryRecords(incoming,previous,limit=200){
+  const records=[];
+  for(const record of [...incoming,...previous]){
+    if(!validHistoryRecord(record)||records.some(saved=>record.id&&saved.id?saved.id===record.id:saved.time===record.time&&saved.message===record.message))continue;
+    records.push(record);
+  }
+  return records.sort((a,b)=>b.time-a.time).slice(0,limit);
+}
+function historyTime(value,utc=false){
+  if(!Number.isFinite(value))return 'Not recorded';
+  const date=new Date(utc?value*1000:value);
+  if(!Number.isFinite(date.getTime()))return 'Not recorded';
+  return utc?date.toISOString().replace('T',' ').replace('.000Z',' UTC'):date.toLocaleString();
+}
+function historyEvidence(record){
+  const evidence=record.evidence;
+  if(!evidence||typeof evidence!=='object')return 'Not recorded';
+  const labels={distancePercent:'Distance at evaluation (%)',thresholdPercent:'Proximity threshold (%)',relativeVolume:'Relative volume (×)',minRelativeVolume:'Required relative volume (×)',candleVolume:'Signal candle volume (ETH)',averageVolume:'Preceding average volume (ETH)',lookbackCandles:'Completed daily lookback',volumeSource:'Volume source'};
+  const parts=[];
+  for(const [key,label] of Object.entries(labels)){
+    const value=evidence[key];
+    if(typeof value==='number'&&Number.isFinite(value))parts.push(label+': '+value.toLocaleString('en-US',{maximumFractionDigits:6}));
+    else if(typeof value==='string'&&value)parts.push(label+': '+value);
+  }
+  return parts.join(' · ')||'Not recorded';
+}
+function historyRecordMarkup(record,open=false,decision=false){
+  const delivery={pending:'Pending Codex report',reported:'Acknowledged by Codex',cancelled:'Cancelled after settings change',local:'Saved in this browser'}[historyDelivery(record)]||'Not recorded';
+  const fields=[
+    ['Recorded level',historyLevel(record)==='unrecorded'?'Not recorded':historyLevel(record)],
+    ['Historical level price',Number.isFinite(record.levelPrice)&&record.levelPrice>0?usd(record.levelPrice):'Not recorded'],
+    ['Evaluated at',historyTime(record.evaluatedAt)],
+    ['Candle start',historyTime(record.candleTime,true)],
+    ['Signal',{breach:'Breach',proximity:'Proximity'}[historyKind(record)]||'Not recorded'],
+    ['Mode',{immediate:'Immediate breach',close:'Completed daily close',retest:'Daily retest'}[record.mode]||'Not recorded'],
+    ['Configuration revision',Number.isSafeInteger(record.revision)&&record.revision>0?String(record.revision):'Not recorded'],
+    [decision?'Decision reason':'Delivery',decision?(typeof record.reason==='string'?record.reason:'Not recorded'):delivery],
+    ['Evidence',historyEvidence(record)]
+  ];
+  return '<details class="event history-record'+(decision?' decision-record':'')+'" data-history-id="'+escapeHTML(historyRecordId(record))+'"'+(open?' open':'')+'><summary><span class="history-message">'+escapeHTML(record.message)+'</span><small>'+escapeHTML(historyTime(record.time))+' · '+escapeHTML(decision?'Evaluation decision':delivery)+'</small></summary><dl class="history-details">'+fields.map(([label,value])=>'<div><dt>'+escapeHTML(label)+'</dt><dd>'+escapeHTML(value)+'</dd></div>').join('')+'</dl></details>';
+}
+function renderHistoryList(list,records,empty,decision=false){
+  const key=JSON.stringify(records);
+  if(list.dataset.historyKey===key)return;
+  const open=new Set([...list.querySelectorAll('details[open]')].map(record=>record.dataset.historyId));
+  list.innerHTML=records.length?records.map(record=>historyRecordMarkup(record,open.has(String(historyRecordId(record))),decision)).join(''):'<div class="empty-alert">'+escapeHTML(empty)+'</div>';
+  list.dataset.historyKey=key;
+}
+function renderEvents(){
+  $('alert-count').textContent=state.events.length;
+  const records=filterHistory(state.events,$('history-level').value,$('history-kind').value,$('history-delivery').value);
+  $('history-count').textContent='Showing '+records.length+' of '+state.events.length+' saved alerts · latest 200 server records; latest 50 kept in this browser';
+  renderHistoryList($('alert-list'),records,state.events.length?'No alerts match these filters.':'All quiet for now. New threshold breaches will appear here.');
+}
+function renderDecisions(){
+  $('decision-count').textContent=state.decisions.length;
+  const records=filterHistory(state.decisions,$('decisions-level').value,$('decisions-kind').value);
+  $('decisions-count').textContent='Showing '+records.length+' of '+state.decisions.length+' evaluation decisions · latest 200';
+  renderHistoryList($('decision-list'),records,state.decisions.length?'No decisions match these filters.':'No evaluation decisions recorded.',true);
+}
 async function api(path,body){const response=await fetch('/api/'+path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(18000),cache:'no-store'});const data=await response.json();if(!response.ok)throw new Error(data.error||'Monitor service unavailable');return data;}
 function applyConfig(next){config=validateConfig(next);state.armed=config.armed;levels=Object.entries(levelNames).map(([code,name])=>({code,name,price:config.levels[code]}));$('range-support').textContent=usd(config.levels.S1);$('range-resistance').textContent=usd(config.levels.R1);$('rule-summary').textContent=`${{immediate:'Immediate breach',close:'Completed daily close',retest:'Daily retest'}[config.mode]} · ${config.cooldownMinutes}m cooldown · Saved revision ${config.revision}`;renderArmed();renderLevels();if(state.price)renderPosition(state.price);draw();}
-function showMonitor(data,notify=false){state.serverReady=true;if(data.config)applyConfig(data.config);const events=data.events||[];for(const event of events){if(!state.seen.has(event.id)){state.seen.add(event.id);if(notify&&state.bootstrapped&&Date.now()-event.time<120000){toast(event.message);if('Notification' in window&&Notification.permission==='granted'){try{new Notification('Ether Watch · Price alert',{body:event.message,tag:event.id});}catch{}}}}}if(events.length){state.events=[...events,...state.events.filter(old=>!events.some(e=>e.id===old.id||e.time===old.time&&e.message===old.message))].sort((a,b)=>b.time-a.time).slice(0,50);renderEvents();}persist();state.bootstrapped=true;const bg=data.background||{};state.background=bg;const delayed=bg.lastCheck&&Date.now()-bg.lastCheck>bg.intervalMinutes*120000;$('background-status').textContent=!bg.enabled?(bg.lastCheck?'Scheduled checks paused':'Scheduled checks off'):bg.lastError?'Background check failed':config.armed?(delayed?'Background check delayed':'Codex monitoring configured'):'Alerts paused';$('background-last').textContent=(bg.lastCheck?'Last background check: '+new Date(bg.lastCheck).toLocaleString():'No background check recorded')+(data.lastEvaluatedCandle?' · Daily candle: '+new Date(data.lastEvaluatedCandle*1000).toISOString().slice(0,10):'');$('background-note').textContent=!bg.enabled?'Scheduled Codex checks are paused. Browser alerts continue while this page is open and connected.':bg.lastError?bg.lastError:`Checks every ${bg.intervalMinutes} minutes while Codex and this machine are available. Brief breaches between checks can be missed.`;if(data.evaluationError)$('rule-summary').textContent+=' · Evaluation error: '+data.evaluationError;renderMonitorStrip();}
+function showMonitor(data,notify=false){state.serverReady=true;if(data.config)applyConfig(data.config);const events=(Array.isArray(data.events)?data.events:[]).filter(validHistoryRecord);for(const event of events){const key=historyRecordId(event);if(!state.seen.has(key)){state.seen.add(key);if(notify&&state.bootstrapped&&Date.now()-event.time<120000){toast(event.message);if('Notification' in window&&Notification.permission==='granted'){try{new Notification('Ether Watch · Price alert',{body:event.message,tag:key});}catch{}}}}}state.events=mergeHistoryRecords(events,state.events);if(Array.isArray(data.decisions))state.decisions=mergeHistoryRecords(data.decisions,state.decisions);renderEvents();renderDecisions();persist();state.bootstrapped=true;const bg=data.background||{};state.background=bg;const delayed=bg.lastCheck&&Date.now()-bg.lastCheck>bg.intervalMinutes*120000;$('background-status').textContent=!bg.enabled?(bg.lastCheck?'Scheduled checks paused':'Scheduled checks off'):bg.lastError?'Background check failed':config.armed?(delayed?'Background check delayed':'Codex monitoring configured'):'Alerts paused';$('background-last').textContent=(bg.lastCheck?'Last background check: '+new Date(bg.lastCheck).toLocaleString():'No background check recorded')+(data.lastEvaluatedCandle?' · Daily candle: '+new Date(data.lastEvaluatedCandle*1000).toISOString().slice(0,10):'');$('background-note').textContent=!bg.enabled?'Scheduled Codex checks are paused. Browser alerts continue while this page is open and connected.':bg.lastError?bg.lastError:`Checks every ${bg.intervalMinutes} minutes while Codex and this machine are available. Brief breaches between checks can be missed.`;if(data.evaluationError)$('rule-summary').textContent+=' · Evaluation error: '+data.evaluationError;renderMonitorStrip();}
 function renderMonitorStrip(){
   $('monitor-alerts').textContent=state.serverReady?(config.armed?'Browser alerts armed':'Alerts paused'):'Alert service unavailable';
   $('monitor-distances').textContent=state.price?`S1 ${Math.abs(state.price/config.levels.S1*100-100).toFixed(2)}% ${state.price>=config.levels.S1?'above':'below'} · R1 ${Math.abs(state.price/config.levels.R1*100-100).toFixed(2)}% ${state.price>=config.levels.R1?'above':'below'}`:'S1 / R1 distances awaiting price';
@@ -148,13 +213,50 @@ $('news-more').addEventListener('click',()=>{newsState.visible+=6;newsRender();}
 $('news-clear').addEventListener('click',()=>{newsState.selected=null;$('news-selection').textContent='';$('news-marker-stories').replaceChildren();$('news-daily').hidden=true;newsRender();});
 $('news-daily').addEventListener('click',async()=>{const item=(newsState.data?.items||[]).find(item=>item.id===newsState.selected);if(!item)return;chartPrefs.timeframe=86400;$('chart-timeframe').value='86400';graphState.generation++;graphState.candles=[];graphState.loadedAt=0;saveGraphPrefs();await refreshGraph();focusNews(item);});
 mountCalendar();
-function renderArmed(){$('pause').textContent=state.armed?'Pause alerts':'Resume alerts';$('armed-badge').textContent=state.serverReady?(state.armed?'ARMED':'PAUSED'):'LOADING';$('rule-summary').textContent=`${usd(config.levels.S1)} support / ${usd(config.levels.R1)} resistance · ${{immediate:'Immediate breach',close:'Completed daily close',retest:'Daily retest'}[config.mode]} · ${config.cooldownMinutes}m cooldown${config.mode==='retest'?' · ±'+config.retestTolerance+'% within '+config.retestCandles+' daily candles':''} · Revision ${config.revision} · ${state.armed?'armed':'paused'}`;}
+function renderArmed(){
+  $('pause').textContent=state.armed?'Pause alerts':'Resume alerts';
+  $('armed-badge').textContent=state.serverReady?(state.armed?'ARMED':'PAUSED'):'LOADING';
+  const selected=config.selectedLevels.map(code=>code+' '+usd(config.levels[code])).join(' / ');
+  const options=(config.proximity.enabled?' · Proximity within '+config.proximity.distancePercent+'%':' · Proximity off')+(config.volumeConfirmation.enabled?' · Volume ≥ '+config.volumeConfirmation.minRelativeVolume+'× preceding '+config.volumeConfirmation.lookbackCandles+' daily candles':' · Volume confirmation off');
+  $('rule-summary').textContent=selected+' · '+{immediate:'Immediate breach',close:'Completed daily close',retest:'Daily retest'}[config.mode]+' · '+config.cooldownMinutes+'m cooldown'+(config.mode==='retest'?' · ±'+config.retestTolerance+'% within '+config.retestCandles+' daily candles':'')+options+' · Revision '+config.revision+' · '+(state.armed?'armed':'paused');
+}
 $('pause').addEventListener('click',async()=>{if(!state.serverReady)return toast('Saved settings service is unavailable.');try{showMonitor(await api('config',{...config,armed:!config.armed,expectedRevision:config.revision}));persist();}catch(e){toast(e.message);}});
 $('notify').addEventListener('click',async()=>{if(!('Notification' in window)){toast('This browser does not support desktop notifications. In-page alerts remain available.');return;}try{const permission=await Notification.requestPermission();$('notification-note').textContent=permission==='granted'?'Browser notifications enabled. Keep this page open and connected.':'Notifications are not enabled. You can change permission in browser settings; in-page alerts still work.';$('notify').textContent=permission==='granted'?'Notifications enabled':'Enable notifications';}catch{toast('Browser notifications unavailable. In-page alerts remain active.');}});
-function fillSettings(){editingConfig=structuredClone(config);for(const [code,value] of Object.entries(editingConfig.levels))$('level-'+code).value=value;$('alert-mode').value=editingConfig.mode;$('cooldown-minutes').value=editingConfig.cooldownMinutes;$('settings-error').textContent='';}
+function syncVolumeConfirmation(){
+  const immediate=$('alert-mode').value==='immediate';
+  $('volume-confirmation').disabled=immediate;
+  if(immediate)$('volume-confirmation').checked=false;
+  $('volume-confirmation-note').textContent=(immediate?'Volume confirmation is off in immediate mode. Choose daily-close or retest to enable it. ':'')+'When enabled, the signal candle must have at least 1.5× the average volume of the preceding 20 completed daily candles.';
+}
+function fillSettingsFields(next){
+  for(const [code,value] of Object.entries(next.levels))$('level-'+code).value=value;
+  for(const code of Object.keys(DEFAULT_CONFIG.levels))$('alert-level-'+code).checked=next.selectedLevels.includes(code);
+  $('alert-mode').value=next.mode;
+  $('cooldown-minutes').value=next.cooldownMinutes;
+  $('proximity-enabled').checked=next.proximity.enabled;
+  $('proximity-distance').value=next.proximity.distancePercent;
+  $('volume-confirmation').checked=next.volumeConfirmation.enabled;
+  syncVolumeConfirmation();
+}
+function readSettings(){
+  if(!editingConfig)throw new Error('Reopen settings before saving.');
+  const mode=$('alert-mode').value;
+  return validateConfig({...editingConfig,
+    levels:Object.fromEntries(Object.keys(editingConfig.levels).map(code=>[code,$('level-'+code).value])),
+    mode,cooldownMinutes:$('cooldown-minutes').value,
+    selectedLevels:Object.keys(DEFAULT_CONFIG.levels).filter(code=>$('alert-level-'+code).checked),
+    proximity:{enabled:$('proximity-enabled').checked,distancePercent:$('proximity-distance').value},
+    volumeConfirmation:{enabled:mode!=='immediate'&&$('volume-confirmation').checked,lookbackCandles:20,minRelativeVolume:1.5}
+  });
+}
+function fillSettings(){editingConfig=structuredClone(config);fillSettingsFields(editingConfig);$('settings-error').textContent='';}
+function resetSettings(){fillSettingsFields(DEFAULT_CONFIG);$('settings-error').textContent='Defaults are ready. Save to apply.';}
 $('settings-open').addEventListener('click',()=>{if(!state.serverReady)return toast('Saved settings service is unavailable. Try Refresh.');fillSettings();$('settings-dialog').showModal();});
 $('settings-cancel').addEventListener('click',()=>$('settings-dialog').close());
-$('settings-reset').addEventListener('click',()=>{for(const [code,value] of Object.entries(DEFAULT_CONFIG.levels))$('level-'+code).value=value;$('alert-mode').value=DEFAULT_CONFIG.mode;$('cooldown-minutes').value=DEFAULT_CONFIG.cooldownMinutes;$('settings-error').textContent='Defaults are ready. Save to apply.';});
-$('settings-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;try{const next=validateConfig({...editingConfig,levels:Object.fromEntries(Object.keys(editingConfig.levels).map(code=>[code,$('level-'+code).value])),mode:$('alert-mode').value,cooldownMinutes:Number($('cooldown-minutes').value)});for(const button of form.querySelectorAll('button'))button.disabled=true;showMonitor(await api('config',{...next,expectedRevision:editingConfig.revision}));$('settings-dialog').close();toast('Levels and alert rule saved.');}catch(e){$('settings-error').textContent=e.message;}finally{for(const button of form.querySelectorAll('button'))button.disabled=false;}});
+$('settings-reset').addEventListener('click',resetSettings);
+$('alert-mode').addEventListener('change',syncVolumeConfirmation);
+for(const id of ['history-level','history-kind','history-delivery'])$(id).addEventListener('change',renderEvents);
+for(const id of ['decisions-level','decisions-kind'])$(id).addEventListener('change',renderDecisions);
+$('settings-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;try{const next=readSettings();for(const button of form.querySelectorAll('button'))button.disabled=true;showMonitor(await api('config',{...next,expectedRevision:editingConfig.revision}));$('settings-dialog').close();toast('Levels and alert options saved.');}catch(e){$('settings-error').textContent=e.message;}finally{for(const button of form.querySelectorAll('button'))button.disabled=false;}});
 async function loadSettings(){try{let data=await api('state');if(legacyPaused&&data.config.revision===1)data=await api('config',{...data.config,armed:false,expectedRevision:1});showMonitor(data);legacyPaused=false;try{localStorage.setItem('etherwatch-migrated','1');}catch{}}catch(e){state.serverReady=false;$('armed-badge').textContent='UNAVAILABLE';$('rule-summary').textContent='Saved monitor service unavailable';$('background-status').textContent='Configuration unavailable';$('background-note').textContent='Live chart data remains available. Alert settings could not be loaded.';}}
 applyConfig(config);renderEvents();loadSettings().then(async()=>{await Promise.all([refresh(),refreshGraph()]);await checkAlert();});setInterval(async()=>{await Promise.all([refresh(),refreshGraph()]);await checkAlert();},15000);setInterval(()=>{if(state.lastSuccess&&Date.now()-state.lastSuccess>45000)feedError('No recent successful update');renderChartFreshness();},5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadSettings();refresh();refreshGraph();refreshNews();}});

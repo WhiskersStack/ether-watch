@@ -1,18 +1,22 @@
 // Hosted behind Sites' unchanged owner-only access policy. Service callers use
 // Sites dispatch authorization; its validated bearer is consumed before here.
 const json=(body,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store'}});
-const initial=()=>({config:{...DEFAULT_CONFIG,levels:{...DEFAULT_CONFIG.levels},revision:1},engine:null,events:[],background:{enabled:false,intervalMinutes:5,lastCheck:null,lastError:null}});
+const initial=()=>({config:validateConfig({...DEFAULT_CONFIG,revision:1}),engine:null,events:[],decisions:[],background:{enabled:false,intervalMinutes:5,lastCheck:null,lastError:null}});
 async function load(db){await db.prepare('INSERT OR IGNORE INTO monitor (id, version, data) VALUES (1, 0, ?)').bind(JSON.stringify(initial())).run();const row=await db.prepare('SELECT version, data FROM monitor WHERE id = 1').first();if(!row)throw new Error('Monitor storage unavailable');return {version:row.version,data:JSON.parse(row.data)};}
 async function change(db,operation){for(let attempt=0;attempt<5;attempt++){const row=await load(db),data=operation(row.data);const result=await db.prepare('UPDATE monitor SET version = version + 1, data = ? WHERE id = 1 AND version = ?').bind(JSON.stringify(data),row.version).run();if(result.meta?.changes===1)return data;}throw new Error('Settings changed concurrently. Please retry.');}
-function publicState(data){return {config:data.config,events:data.events,background:data.background,lastEvaluatedCandle:data.engine?.lastEvaluatedCandle??null,evaluationError:data.evaluationError??null};}
+function publicState(data){return {config:validateConfig(data.config),events:data.events,decisions:data.decisions??[],background:data.background,lastEvaluatedCandle:data.engine?.lastEvaluatedCandle??null,evaluationError:data.evaluationError??null};}
 function validOrigin(request){const origin=request.headers.get('Origin');return !origin||origin===new URL(request.url).origin;}
 async function bodyJSON(request){if(request.headers.get('Content-Type')?.split(';')[0]!=='application/json')throw new Error('JSON request required');const text=await request.text();if(text.length>16000)throw new Error('Request is too large');return JSON.parse(text);}
 async function market(path){const response=await fetch('https://api.exchange.coinbase.com/products/ETH-USD/'+path,{signal:AbortSignal.timeout(12000),headers:{Accept:'application/json'}});if(!response.ok)throw new Error('Coinbase feed unavailable ('+response.status+')');return response.json();}
+function mergeSavedConfig(input,current){const next={...input};for(const key of ['selectedLevels','proximity','volumeConfirmation'])if(!Object.hasOwn(input,key))next[key]=current[key];return validateConfig(next);}
+function retainDecisions(previous,fresh){const seen=new Set();return [...(previous??[]),...(fresh??[])].filter(item=>{if(seen.has(item.id))return false;seen.add(item.id);return true;}).sort((a,b)=>b.time-a.time||b.evaluatedAt-a.evaluatedAt).slice(0,200);}
 async function runCheck(db,source){
   try{
-    const current=(await load(db)).data;
-    const [ticker,raw]=await Promise.all([market('ticker'),current.config.mode==='immediate'?Promise.resolve([]):market('candles?granularity=86400')]);
-    const now=Date.now(),snapshot={...acceptTicker(ticker,now),candles:normalizeCandles(raw,now)};
+    const current=(await load(db)).data,config=validateConfig(current.config);
+    const [ticker,candles]=await Promise.allSettled([market('ticker'),config.mode==='immediate'?Promise.resolve([]):market('candles?granularity=86400')]);
+    if(ticker.status!=='fulfilled')throw ticker.reason;
+    if(candles.status!=='fulfilled'&&!config.proximity.enabled)throw candles.reason;
+    const now=Date.now(),snapshot={...acceptTicker(ticker.value,now),candles:candles.status==='fulfilled'?candles.value:[],...(candles.status==='fulfilled'?{}:{candleError:candles.reason?.message||'Daily candle feed unavailable'})};
     return await change(db,data=>{
       if(data.config.revision!==current.config.revision)throw new Error('Settings changed during this check. Retrying on the next check.');
       const result=evaluate(data.config,data.engine,snapshot,Date.now()),known=new Set(data.events.map(e=>e.id));
@@ -20,7 +24,7 @@ async function runCheck(db,source){
       const all=[...fresh,...data.events],pending=all.filter(e=>e.delivery==='pending');
       if(pending.length>200)throw new Error('Pending notification queue is full. Review notifications before more checks.');
       const retained=[...pending,...all.filter(e=>e.delivery!=='pending').slice(0,200-pending.length)].sort((a,b)=>b.time-a.time);
-      return {...data,engine:result.state,events:retained,evaluationError:null,background:source==='codex'?{...data.background,lastCheck:Date.now(),lastError:null}:data.background};
+      return {...data,engine:result.state,events:retained,decisions:retainDecisions(data.decisions,result.decisions),evaluationError:result.evaluationError??null,background:source==='codex'?{...data.background,...(result.evaluationError?{lastAttempt:Date.now(),lastError:result.evaluationError}:{lastCheck:Date.now(),lastError:null})}:data.background};
     });
   }catch(error){
     await change(db,data=>({...data,evaluationError:error.message,background:source==='codex'?{...data.background,lastAttempt:Date.now(),lastError:error.message}:data.background}));
@@ -32,7 +36,19 @@ if(request.method==='GET'&&path==='/api/state')return json(publicState((await lo
 if(request.method!=='POST')return json({error:'Method not allowed'},405);
 if(!validOrigin(request))return json({error:'Same-origin request required'},403);
 const input=await bodyJSON(request);
-if(path==='/api/config'){if(!request.headers.get('oai-authenticated-user-id'))return json({error:'Signed-in owner required to change settings'},401);let next;try{next=validateConfig(input);}catch(error){return json({error:error.message},400);}const data=await change(env.DB,old=>{if(input.expectedRevision!==old.config.revision)throw new Error('Settings were updated elsewhere. Refresh and try again.');if(JSON.stringify({...next,revision:old.config.revision})===JSON.stringify(validateConfig(old.config)))return old;return {...old,config:{...next,revision:old.config.revision+1},events:old.events.map(e=>e.delivery==='pending'?{...e,delivery:'cancelled',reason:'Settings changed before Codex reported this event'}:e)};});return json(publicState(data));}
+if(path==='/api/config'){
+  if(!request.headers.get('oai-authenticated-user-id'))return json({error:'Signed-in owner required to change settings'},401);
+  if(!input||typeof input!=='object'||Array.isArray(input))return json({error:'Settings must be an object.'},400);
+  try{
+    const data=await change(env.DB,old=>{
+      if(input.expectedRevision!==old.config.revision)throw new Error('Settings were updated elsewhere. Refresh and try again.');
+      let next;try{next=mergeSavedConfig(input,old.config);}catch(error){error.status=400;throw error;}
+      if(JSON.stringify({...next,revision:old.config.revision})===JSON.stringify(validateConfig(old.config)))return old;
+      return {...old,config:{...next,revision:old.config.revision+1},events:old.events.map(e=>e.delivery==='pending'?{...e,delivery:'cancelled',reason:'Settings changed before Codex reported this event'}:e)};
+    });
+    return json(publicState(data));
+  }catch(error){if(error.status===400)return json({error:error.message},400);throw error;}
+}
 if(path==='/api/check'){const source=input.source==='codex'?'codex':'browser',data=await runCheck(env.DB,source);return json({...publicState(data),pending:data.config.armed?data.events.filter(e=>e.delivery==='pending'):[]});}
 if(path==='/api/background'){if(typeof input.enabled!=='boolean'||!Number.isInteger(input.intervalMinutes)||input.intervalMinutes<5||input.intervalMinutes>1440)throw new Error('Invalid background configuration');return json(publicState(await change(env.DB,data=>({...data,background:{...data.background,enabled:input.enabled,intervalMinutes:input.intervalMinutes}}))));}
 if(path==='/api/ack'){if(!Array.isArray(input.ids)||input.ids.length>200||!input.ids.every(id=>typeof id==='string'&&id.length<250))throw new Error('Invalid event IDs');const ids=new Set(input.ids);return json(publicState(await change(env.DB,data=>({...data,events:data.events.map(e=>ids.has(e.id)?{...e,delivery:'reported',reportedAt:Date.now()}:e)}))));}
