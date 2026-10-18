@@ -53,6 +53,22 @@ export function calendarParseBlsICS(ics){
   }
   if(!events.length)throw new Error('Official calendar format is unrecognized');return calendarUnique(events);
 }
+export function calendarParseBlsAnnualHTML(html,year){
+  html=calendarCheckedText(html);
+  if(!Number.isInteger(year)||!new RegExp('Schedule of Selected Releases\\s+'+year+'\\b','i').test(calendarText(html)))throw new Error('Official calendar format is unrecognized');
+  const source=CALENDAR_SOURCES[0],url='https://www.bls.gov/schedule/'+year+'/home.htm',events=[];
+  for(const table of html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/gi)){
+    if(!/Date\s+Time\s+Release/i.test(calendarText(table[1])))continue;
+    for(const row of table[1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
+      const cells=[...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)].map(match=>calendarText(match[1]));
+      if(cells.length!==3||!/^Consumer Price Index\s+for\s+/i.test(cells[2]))continue;
+      const date=calendarMonthDate(cells[0]);
+      if(date&&Number(date.slice(0,4))===year)events.push(calendarEvent(source,'cpi',cells[2],date,calendarClock(cells[1]),'America/New_York',url));
+    }
+  }
+  if(!events.length)throw new Error('Official calendar format is unrecognized');
+  return calendarUnique(events);
+}
 export function calendarParseBeaHTML(html){
   html=calendarCheckedText(html);const source=CALENDAR_SOURCES[1],text=calendarText(html),year=text.match(/\bYear\s+(20\d{2})\b/)?.[1];
   if(!/Release Schedule/i.test(text)||!year)throw new Error('Official calendar format is unrecognized');
@@ -89,7 +105,14 @@ async function calendarFetchText(url,source,fetcher,budget){
   for(let redirect=0;redirect<3;redirect++){if(++budget.requests>calendarMaxRequests)throw new Error('Official calendar request limit reached');const response=await fetcher(target,{redirect:'manual',signal:AbortSignal.timeout(6000),headers:{Accept:'text/html, text/calendar;q=0.9'}});if([301,302,303,307,308].includes(response.status)){target=calendarSafeURL(response.headers.get('Location')??'',source,target);if(!target)throw new Error('Official calendar redirect is not allowed');continue;}if(!response.ok)throw new Error('HTTP '+response.status);if(response.url&&!calendarSafeURL(response.url,source))throw new Error('Official calendar redirect is not allowed');return calendarReadBody(response);}throw new Error('Official calendar redirect limit reached');
 }
 async function calendarReadSource(source,fetcher,now,budget){
-  if(source.id==='bls'){try{return {events:calendarParseBlsHTML(await calendarFetchText(source.url,source,fetcher,budget)),roadmap:[],warning:null};}catch{const ics=await calendarFetchText('https://www.bls.gov/schedule/news_release/bls.ics',source,fetcher,budget);return {events:calendarParseBlsICS(ics),roadmap:[],warning:'CPI HTML schedule unavailable; using the official iCalendar.'};}}
+  if(source.id==='bls'){
+    try{return {events:calendarParseBlsHTML(await calendarFetchText(source.url,source,fetcher,budget)),roadmap:[],warning:null};}catch{}
+    try{return {events:calendarParseBlsICS(await calendarFetchText('https://www.bls.gov/schedule/news_release/bls.ics',source,fetcher,budget)),roadmap:[],warning:'CPI HTML schedule unavailable; using the official iCalendar.'};}catch{}
+    const first=new Date(now).getUTCFullYear(),last=new Date(now+calendarWindowMs).getUTCFullYear(),years=first===last?[first]:[first,last];
+    const results=await Promise.allSettled(years.map(year=>calendarFetchText('https://www.bls.gov/schedule/'+year+'/home.htm',source,fetcher,budget).then(html=>calendarParseBlsAnnualHTML(html,year))));
+    const valid=results.filter(result=>result.status==='fulfilled');if(!valid.length)throw results[0].reason;
+    return {events:calendarUnique(valid.flatMap(result=>result.value)),roadmap:[],warning:'CPI HTML and iCalendar unavailable; using the official annual schedule.'+(valid.length<results.length?' One schedule year is unavailable.':'')};
+  }
   if(source.id==='bea'){const urls=[source.url];if(new Date(now+calendarWindowMs).getUTCFullYear()!==new Date(now).getUTCFullYear())urls.push('https://www.bea.gov/news/schedule/next-year');const results=await Promise.allSettled(urls.map(url=>calendarFetchText(url,source,fetcher,budget).then(calendarParseBeaHTML))),valid=results.filter(result=>result.status==='fulfilled');if(!valid.length)throw results[0].reason;return {events:calendarUnique(valid.flatMap(result=>result.value)),roadmap:[],warning:valid.length<results.length?'One BEA schedule year is unavailable.':null};}
   if(source.id==='fed')return {events:calendarParseFomcHTML(await calendarFetchText(source.url,source,fetcher,budget)),roadmap:[],warning:null};
   const [protocol,planning]=await Promise.allSettled([calendarFetchText(source.url,source,fetcher,budget).then(calendarMainnetLinks),calendarFetchText('https://ethereum.org/roadmap/',source,fetcher,budget).then(html=>calendarParseRoadmapHTML(html,now))]);

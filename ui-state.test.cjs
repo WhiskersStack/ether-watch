@@ -1,6 +1,28 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
 const source=fs.readFileSync(__dirname+'/dist/app.js','utf8');
 function extract(from,to){const a=source.indexOf(from),b=source.indexOf(to,a);assert.ok(a>=0&&b>a);return source.slice(a,b);}
+test('read-only viewers do not evaluate alerts or consume a pending legacy pause migration',async()=>{
+  const calls=[],writes=[],ctx=vm.createContext({state:{serverReady:true,canCheck:false},legacyPaused:true,localStorage:{setItem(key){writes.push(key);}},api:async path=>{calls.push(path);return {config:{revision:1},access:{canManage:false,canCheck:false}};},showMonitor(){},$:()=>({}),renderMonitorStrip(){}});
+  vm.runInContext(extract('async function checkAlert()','function renderPosition('),ctx);await ctx.checkAlert();assert.equal(calls.length,0);
+  vm.runInContext(extract('async function loadSettings()','applyConfig(config);renderEvents();'),ctx);await ctx.loadSettings();assert.deepEqual(calls,['state']);assert.equal(ctx.legacyPaused,true);assert.deepEqual(writes,[]);
+});
+test('read-only history persistence preserves an unmigrated local pause',()=>{
+  const values={'etherwatch-armed':'false'},ctx=vm.createContext({legacyPaused:true,state:{armed:true,events:[]},localStorage:{setItem:(key,value)=>values[key]=value}});
+  vm.runInContext(extract('function persist()','function toast('),ctx);ctx.persist();assert.equal(values['etherwatch-armed'],'false');
+});
+test('configured owner still migrates the legacy paused preference exactly once',async()=>{
+  const calls=[],values={},ctx=vm.createContext({legacyPaused:true,state:{},localStorage:{setItem:(key,value)=>values[key]=value},api:async(path,body)=>{calls.push({path,body});return {config:{revision:path==='state'?1:2},access:{canManage:true,canCheck:true}};},showMonitor(){},$:()=>({})});
+  vm.runInContext(extract('async function loadSettings()','applyConfig(config);renderEvents();'),ctx);await ctx.loadSettings();
+  assert.deepEqual(calls.map(call=>call.path),['state','config']);assert.equal(calls[1].body.armed,false);assert.equal(calls[1].body.expectedRevision,1);assert.equal(ctx.legacyPaused,false);assert.equal(values['etherwatch-migrated'],'1');
+  await ctx.loadSettings();assert.deepEqual(calls.map(call=>call.path),['state','config','state']);
+});
+test('monitor controls reflect owner permission and sign-in uses a top-level platform route',()=>{
+  const elements={},ctx=vm.createContext({Date,state:{serverReady:true,canManage:false,canCheck:false,price:null,background:null,lastCheck:0},config:{armed:true},$:id=>elements[id]??={}});
+  vm.runInContext(extract('function renderMonitorStrip()','async function checkAlert()'),ctx);ctx.renderMonitorStrip();
+  assert.equal(elements['settings-open'].disabled,true);assert.equal(elements.pause.disabled,true);assert.equal(elements['monitor-signin'].hidden,false);assert.match(elements['monitor-alerts'].textContent,/Read-only/);
+  ctx.state.canManage=ctx.state.canCheck=true;ctx.renderMonitorStrip();assert.equal(elements.pause.disabled,false);assert.equal(elements['monitor-signin'].hidden,true);
+  const html=fs.readFileSync(__dirname+'/dist/index.html','utf8');assert.match(html,/href="\/signin-with-chatgpt\?return_to=%2F" target="_top"/);
+});
 
 const themeHTML=fs.readFileSync(__dirname+'/dist/index.html','utf8');
 const themeCSS=fs.readFileSync(__dirname+'/dist/style.css','utf8');
@@ -129,7 +151,7 @@ test('server history merges updated delivery states without clearing old records
   assert.equal(many.length,200);assert.equal(many[0].time,204);assert.equal(many.at(-1).time,5);
 });
 test('browser history persistence keeps 50 while retaining 200 in active memory',()=>{
-  const values={},state={armed:true,events:Array.from({length:200},(_,i)=>({message:'Signal '+i,time:i}))},ctx=vm.createContext({state,localStorage:{setItem(key,value){values[key]=value;}}});
+  const values={},state={armed:true,events:Array.from({length:200},(_,i)=>({message:'Signal '+i,time:i}))},ctx=vm.createContext({state,legacyPaused:false,localStorage:{setItem(key,value){values[key]=value;}}});
   vm.runInContext(extract('function persist()','function toast('),ctx);ctx.persist();
   assert.equal(JSON.parse(values['etherwatch-alerts']).length,50);assert.equal(state.events.length,200);
 });

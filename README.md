@@ -8,7 +8,7 @@ Ether Watch is a responsive ETH/USD dashboard that combines live market data, in
 
 [Live application](https://etherwatch.app) · [Source code](https://github.com/WhiskersStack/ether-watch)
 
-> The hosted application is configured for owner-only access. The link may require authorization; the source is available in this repository.
+> The dashboard is public. Monitor writes require the configured signed-in owner or a restricted application service credential. See `MONITOR-RUNBOOK.md` for manual runtime provisioning; writes fail closed without it. The existing scheduled monitor remains paused.
 
 ## What it does
 

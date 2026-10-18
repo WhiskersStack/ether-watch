@@ -24,11 +24,48 @@ function database(seed){
     };},async first(){return sqlite.prepare(sql).get();}};}
   };
 }
-function request(path,body,owner=true,origin){return new Request('https://monitor.example/api/'+path,{method:body===undefined?'GET':'POST',headers:{...(owner?{'oai-authenticated-user-id':'test-owner'}:{}),...(body===undefined?{}:{'Content-Type':'application/json'}),...(origin?{Origin:origin}:{})},body:body===undefined?undefined:JSON.stringify(body)});}
-test('settings persist, reject invalid values, detect revision conflict and require identity',async()=>{const env={DB:database()};let response=await worker.fetch(request('state'),env);const before=await response.json();assert.equal(before.config.levels.S1,2416);const edited={...before.config,levels:{...before.config.levels,S1:2400},expectedRevision:1};response=await worker.fetch(request('config',edited),env);assert.equal(response.status,200);const after=await response.json();assert.equal(after.config.levels.S1,2400);assert.equal(after.config.revision,2);assert.equal((await (await worker.fetch(request('state'),env)).json()).config.revision,2);assert.equal((await worker.fetch(request('config',edited),env)).status,503);assert.equal((await worker.fetch(request('config',{...edited,expectedRevision:2},false),env)).status,401);assert.equal((await worker.fetch(request('config',{...edited,expectedRevision:2},true,'https://other.example'),env)).status,403);const invalid={...edited,expectedRevision:2,levels:{...edited.levels,S1:0}};assert.equal((await worker.fetch(request('config',invalid),env)).status,400);});
-test('unattended checks persist one breach and acknowledgement, then stale data fails',async()=>{const env={DB:database()},original=globalThis.fetch;let price=2300,stale=false;globalThis.fetch=async url=>{assert.match(url,/api.exchange.coinbase.com/);return Response.json(url.endsWith('ticker')?{price:String(price),time:new Date(Date.now()-(stale?180000:0)).toISOString()}:[]);};try{const response=await worker.fetch(request('check',{source:'codex'},false),env);assert.equal(response.status,200);const first=await response.json();assert.equal(first.pending.length,1);assert.ok(first.background.lastCheck);const second=await (await worker.fetch(request('check',{source:'browser'}),env)).json();assert.equal(second.events.length,1);await worker.fetch(request('ack',{ids:[first.pending[0].id]},false),env);const third=await (await worker.fetch(request('check',{source:'codex'},false),env)).json();assert.equal(third.pending.length,0);stale=true;assert.equal((await worker.fetch(request('check',{source:'codex'},false),env)).status,503);const failed=await (await worker.fetch(request('state'),env)).json();assert.equal(failed.events.length,1);assert.ok(failed.background.lastError);}finally{globalThis.fetch=original;}});
-test('overlapping checks save one event and pausing cancels pending report without deleting history',async()=>{const env={DB:database()},original=globalThis.fetch;const time=new Date().toISOString();globalThis.fetch=async()=>Response.json({price:'2300',time});try{await Promise.all([worker.fetch(request('check',{source:'codex'},false),env),worker.fetch(request('check',{source:'browser'}),env)]);const before=await (await worker.fetch(request('state'),env)).json();assert.equal(before.events.length,1);const paused=await (await worker.fetch(request('config',{...before.config,armed:false,expectedRevision:before.config.revision}),env)).json();assert.equal(paused.events.length,1);assert.equal(paused.events[0].delivery,'cancelled');assert.equal((await (await worker.fetch(request('check',{source:'codex'},false),env)).json()).pending.length,0);}finally{globalThis.fetch=original;}});
-test('a settings change during network load is rejected and records a visible background error',async()=>{const env={DB:database()},original=globalThis.fetch;let resolveTicker,started;const ready=new Promise(resolve=>{started=resolve;});globalThis.fetch=()=>new Promise(resolve=>{resolveTicker=resolve;started();});try{const running=worker.fetch(request('check',{source:'codex'},false),env);await ready;const data=await (await worker.fetch(request('state'),env)).json();await worker.fetch(request('config',{...data.config,mode:'close',expectedRevision:1}),env);resolveTicker(Response.json({price:'2300',time:new Date().toISOString()}));const result=await running;assert.equal(result.status,503);const after=await (await worker.fetch(request('state'),env)).json();assert.equal(after.events.length,0);assert.match(after.background.lastError,/Settings changed/);}finally{globalThis.fetch=original;}});
+function request(path,body,owner=true,origin){return new Request('https://monitor.example/api/'+path,{method:body===undefined?'GET':'POST',headers:{...(owner?{'oai-authenticated-user-id':'test-owner'}:path==='config'?{}:{'X-Ether-Watch-Monitor-Token':'fixture-monitor-service-token-32-characters'}),...(body===undefined?{}:{'Content-Type':'application/json'}),...(origin?{Origin:origin}:{})},body:body===undefined?undefined:JSON.stringify(body)});}
+
+test('all monitor writes reject anonymous, nonowner, forged-platform, invalid and oversized service credentials before storage or network',async()=>{
+  const original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;throw Error('Unauthorized outbound request');};
+  try{for(const path of ['config','check','background','ack'])for(const headers of [{},{'oai-authenticated-user-id':'another-visitor'},{'OAI-Sites-Authorization':'Bearer fixture-platform-token'},{'X-Ether-Watch-Monitor-Token':'wrong-token'},{'X-Ether-Watch-Monitor-Token':'x'.repeat(257)}]){
+    const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()};
+    const response=await worker.fetch(new Request('https://monitor.example/api/'+path,{method:'POST',headers:{'Content-Type':'application/json',...headers},body:JSON.stringify({source:'codex',enabled:true,intervalMinutes:5,ids:['fixture']})}),env);
+    assert.ok([401,403].includes(response.status),path);assert.equal(env.DB.read(),null,path);assert.equal(env.DB.updateCount(),0);
+  }assert.equal(calls,0);}finally{globalThis.fetch=original;}
+});
+test('missing or malformed owner and service configuration fails closed',async()=>{
+  for(const settings of [{},{MONITOR_OWNER_ID:''},{MONITOR_SERVICE_TOKEN:'too-short'},{MONITOR_SERVICE_TOKEN:'x'.repeat(257)}]){
+    const env={...settings,DB:database()};const response=await worker.fetch(request('background',{enabled:true,intervalMinutes:5}),env);
+    assert.equal(response.status,403);assert.equal(env.DB.read(),null);
+    const service=await worker.fetch(request('check',{source:'codex'},false),env);assert.equal(service.status,401);assert.equal(env.DB.read(),null);
+  }
+});
+test('service permission is limited to checks and acknowledgements',async()=>{
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()};
+  for(const path of ['config','background']){
+    const response=await worker.fetch(new Request('https://monitor.example/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Ether-Watch-Monitor-Token':env.MONITOR_SERVICE_TOKEN},body:JSON.stringify({enabled:true,intervalMinutes:5})}),env);
+    assert.equal(response.status,403);assert.equal(env.DB.read(),null);
+  }
+});
+test('public state exposes caller permissions without exposing configured credentials or owner identity',async()=>{
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()};
+  const publicResponse=await worker.fetch(new Request('https://monitor.example/api/state'),env),data=await publicResponse.json();
+  assert.deepEqual(data.access,{userId:null,canManage:false,canCheck:false});assert.ok(!JSON.stringify(data).includes(env.MONITOR_SERVICE_TOKEN));assert.ok(!JSON.stringify(data).includes(env.MONITOR_OWNER_ID));
+  const owner=await (await worker.fetch(request('state'),env)).json();assert.equal(owner.access.canManage,true);assert.equal(owner.access.canCheck,true);
+});
+test('body source cannot impersonate service activity and authenticated service determines its own source',async()=>{
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()},original=globalThis.fetch;
+  globalThis.fetch=async()=>Response.json({price:'2500',time:new Date().toISOString()});
+  try{
+    const owner=await (await worker.fetch(request('check',{source:'codex'}),env)).json();assert.equal(owner.background.lastCheck,null);
+    const service=await (await worker.fetch(request('check',{source:'browser'},false),env)).json();assert.ok(service.background.lastCheck);
+  }finally{globalThis.fetch=original;}
+});
+test('settings persist, reject invalid values, detect revision conflict and require identity',async()=>{const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()};let response=await worker.fetch(request('state'),env);const before=await response.json();assert.equal(before.config.levels.S1,2416);const edited={...before.config,levels:{...before.config.levels,S1:2400},expectedRevision:1};response=await worker.fetch(request('config',edited),env);assert.equal(response.status,200);const after=await response.json();assert.equal(after.config.levels.S1,2400);assert.equal(after.config.revision,2);assert.equal((await (await worker.fetch(request('state'),env)).json()).config.revision,2);assert.equal((await worker.fetch(request('config',edited),env)).status,503);assert.equal((await worker.fetch(request('config',{...edited,expectedRevision:2},false),env)).status,401);assert.equal((await worker.fetch(request('config',{...edited,expectedRevision:2},true,'https://other.example'),env)).status,403);const invalid={...edited,expectedRevision:2,levels:{...edited.levels,S1:0}};assert.equal((await worker.fetch(request('config',invalid),env)).status,400);});
+test('unattended checks persist one breach and acknowledgement, then stale data fails',async()=>{const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()},original=globalThis.fetch;let price=2300,stale=false;globalThis.fetch=async url=>{assert.match(url,/api.exchange.coinbase.com/);return Response.json(url.endsWith('ticker')?{price:String(price),time:new Date(Date.now()-(stale?180000:0)).toISOString()}:[]);};try{const response=await worker.fetch(request('check',{source:'codex'},false),env);assert.equal(response.status,200);const first=await response.json();assert.equal(first.pending.length,1);assert.ok(first.background.lastCheck);const second=await (await worker.fetch(request('check',{source:'browser'}),env)).json();assert.equal(second.events.length,1);await worker.fetch(request('ack',{ids:[first.pending[0].id]},false),env);const third=await (await worker.fetch(request('check',{source:'codex'},false),env)).json();assert.equal(third.pending.length,0);stale=true;assert.equal((await worker.fetch(request('check',{source:'codex'},false),env)).status,503);const failed=await (await worker.fetch(request('state'),env)).json();assert.equal(failed.events.length,1);assert.ok(failed.background.lastError);}finally{globalThis.fetch=original;}});
+test('overlapping checks save one event and pausing cancels pending report without deleting history',async()=>{const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()},original=globalThis.fetch;const time=new Date().toISOString();globalThis.fetch=async()=>Response.json({price:'2300',time});try{await Promise.all([worker.fetch(request('check',{source:'codex'},false),env),worker.fetch(request('check',{source:'browser'}),env)]);const before=await (await worker.fetch(request('state'),env)).json();assert.equal(before.events.length,1);const paused=await (await worker.fetch(request('config',{...before.config,armed:false,expectedRevision:before.config.revision}),env)).json();assert.equal(paused.events.length,1);assert.equal(paused.events[0].delivery,'cancelled');assert.equal((await (await worker.fetch(request('check',{source:'codex'},false),env)).json()).pending.length,0);}finally{globalThis.fetch=original;}});
+test('a settings change during network load is rejected and records a visible background error',async()=>{const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()},original=globalThis.fetch;let resolveTicker,started;const ready=new Promise(resolve=>{started=resolve;});globalThis.fetch=()=>new Promise(resolve=>{resolveTicker=resolve;started();});try{const running=worker.fetch(request('check',{source:'codex'},false),env);await ready;const data=await (await worker.fetch(request('state'),env)).json();await worker.fetch(request('config',{...data.config,mode:'close',expectedRevision:1}),env);resolveTicker(Response.json({price:'2300',time:new Date().toISOString()}));const result=await running;assert.equal(result.status,503);const after=await (await worker.fetch(request('state'),env)).json();assert.equal(after.events.length,0);assert.match(after.background.lastError,/Settings changed/);}finally{globalThis.fetch=original;}});
 test('news route serves safe publisher data without requiring monitor storage',async()=>{const original=globalThis.fetch;globalThis.fetch=async()=>new Response('<rss><channel><item><title>Ethereum protocol upgrade</title><link>https://blog.ethereum.org/test-story</link><pubDate>'+new Date().toUTCString()+'</pubDate></item></channel></rss>');try{const response=await worker.fetch(new Request('https://monitor.example/api/news'),{});assert.equal(response.status,200);const data=await response.json();assert.equal(data.sources.length,4);assert.equal(data.items[0].title,'Ethereum protocol upgrade');assert.equal((await worker.fetch(new Request('https://monitor.example/api/news',{method:'POST'}),{})).status,405);}finally{globalThis.fetch=original;}});
 
 const START=Date.UTC(2026,9,17),DAY=86400,D=START/1000;
@@ -47,7 +84,7 @@ test('legacy config reads normalize defaults and no-op saves preserve revision, 
   const configuration=config(),generated=engineAPI.evaluate(configuration,null,{price:2300,time:START},START);
   const seed=monitor(legacyConfig(configuration));seed.engine=legacyEngine(generated.state,configuration);
   seed.events=[{...historicalEvent(generated.events[0].id,START,'reported'),message:generated.events[0].message}];delete seed.decisions;
-  const env={DB:database(seed)};
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(seed)};
   const before=await stateOf(env);
   assert.deepEqual(before.config.selectedLevels,['S1','R1']);assert.equal(before.config.proximity.enabled,false);assert.equal(before.config.volumeConfirmation.enabled,false);assert.deepEqual(before.decisions,[]);
   const response=await worker.fetch(request('config',{...seed.config,expectedRevision:1}),env),saved=await response.json();
@@ -61,7 +98,7 @@ test('legacy config reads normalize defaults and no-op saves preserve revision, 
 test('older clients preserve omitted advanced controls on no-op and real config saves',async()=>{
   const configuration=config({mode:'close',selectedLevels:['S2','R1'],proximity:{enabled:true,distancePercent:0.75},volumeConfirmation:{enabled:true,lookbackCandles:20,minRelativeVolume:1.5}});
   const seed=monitor(configuration);seed.events=[historicalEvent('saved-pending',START)];seed.decisions=[{id:'saved-decision',time:START,evaluatedAt:START,reason:'cooldown'}];
-  const env={DB:database(seed)},legacy=legacyConfig(configuration);
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(seed)},legacy=legacyConfig(configuration);
   const unchanged=await (await worker.fetch(request('config',{...legacy,expectedRevision:1}),env)).json();
   assert.equal(unchanged.config.revision,1);assert.deepEqual(unchanged.config.selectedLevels,['S2','R1']);assert.deepEqual(unchanged.config.proximity,configuration.proximity);assert.deepEqual(unchanged.config.volumeConfirmation,configuration.volumeConfirmation);assert.equal(unchanged.events[0].delivery,'pending');assert.equal(unchanged.decisions.length,1);
   const changed=await (await worker.fetch(request('config',{...legacy,levels:{...legacy.levels,S1:2400},expectedRevision:1}),env)).json();
@@ -69,7 +106,7 @@ test('older clients preserve omitted advanced controls on no-op and real config 
 });
 
 test('explicit malformed advanced fields reject without changing saved settings',async()=>{
-  const env={DB:database()},before=await stateOf(env);
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database()},before=await stateOf(env);
   for(const field of ['selectedLevels','proximity','volumeConfirmation']){
     const response=await worker.fetch(request('config',{...before.config,[field]:null,expectedRevision:1}),env);
     assert.equal(response.status,400);assert.equal((await stateOf(env)).config.revision,1);
@@ -83,7 +120,7 @@ test('concurrent retries persist one cooldown decision with engine state and pre
   const configuration=config(),first=engineAPI.evaluate(configuration,null,{price:2300,time:START},START);
   const reentered=engineAPI.evaluate(configuration,first.state,{price:2416,time:START+1000},START+1000);
   const seed=monitor(configuration);seed.engine=reentered.state;seed.events=first.events.map(event=>({...event,delivery:'pending'}));
-  const env={DB:database(seed)};env.DB.conflictNext();
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(seed)};env.DB.conflictNext();
   await fakeMarket({now:START+2000,price:2300},async()=>{
     const results=await Promise.all([checkOf(env,'codex'),checkOf(env)]);assert.equal(results.length,2);
     const after=await stateOf(env);assert.equal(after.events.length,1);assert.equal(after.events[0].delivery,'pending');assert.equal(after.decisions.length,1);assert.equal(after.decisions[0].reason,'cooldown');assert.equal(after.decisions[0].time,START+2000);assert.equal(after.background.enabled,false);
@@ -97,7 +134,7 @@ test('decision history is separately deduplicated and bounded to the newest 200 
   const seed=monitor(configuration);seed.engine=engineAPI.evaluate(configuration,first.state,{price:2416,time:START+1000},START+1000).state;
   seed.events=[historicalEvent('keep-pending',START),historicalEvent('keep-reported',START-1000,'reported')];
   seed.decisions=Array.from({length:220},(_,index)=>({id:'old-'+index,time:START-index-1,evaluatedAt:START-index-1,reason:'cooldown'}));seed.decisions.push({...seed.decisions[0]});
-  const env={DB:database(seed)};
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(seed)};
   await fakeMarket({now:START+2000,price:2300},async()=>{
     const result=await checkOf(env);assert.equal(result.decisions.length,200);assert.equal(new Set(result.decisions.map(item=>item.id)).size,200);assert.equal(result.decisions[0].reason,'cooldown');assert.match(result.decisions[0].id,/^eth-decision:/);assert.ok(!result.decisions.some(item=>item.id==='old-219'));assert.ok(result.events.some(item=>item.id==='keep-pending'&&item.delivery==='pending'));assert.ok(result.events.some(item=>item.id==='keep-reported'));
   });
@@ -105,7 +142,7 @@ test('decision history is separately deduplicated and bounded to the newest 200 
 
 test('a full pending queue fails without advancing state or dropping pending events, then recovers after acknowledgement',async()=>{
   const seed=monitor();seed.events=Array.from({length:200},(_,index)=>historicalEvent('pending-'+index,START-index-1000));seed.decisions=[{id:'old-decision',time:START-1000,evaluatedAt:START-1000,reason:'cooldown'}];
-  const env={DB:database(seed)};
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(seed)};
   await fakeMarket({now:START,price:2300},async()=>{
     const failed=await worker.fetch(request('check',{source:'codex'},false),env);assert.equal(failed.status,503);
     const data=env.DB.read().data;assert.equal(data.engine,null);assert.equal(data.events.length,200);assert.ok(data.events.every(item=>item.delivery==='pending'));assert.equal(data.decisions[0].id,'old-decision');assert.match(data.evaluationError,/queue is full/);assert.equal(data.background.enabled,false);
@@ -115,7 +152,7 @@ test('a full pending queue fails without advancing state or dropping pending eve
 });
 
 test('proximity and secondary breach records persist with independent cooldown and source evidence',async()=>{
-  const env={DB:database(monitor(config({selectedLevels:['S2'],proximity:{enabled:true,distancePercent:0.5}})))},clock={now:START,price:2500};
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(monitor(config({selectedLevels:['S2'],proximity:{enabled:true,distancePercent:0.5}})))},clock={now:START,price:2500};
   await fakeMarket(clock,async()=>{
     assert.equal((await checkOf(env)).events.length,0);
     clock.now+=1000;clock.price=2380;
@@ -126,7 +163,7 @@ test('proximity and secondary breach records persist with independent cooldown a
 });
 
 test('daily low-volume decisions persist and are not converted to notifications by repeat checks',async()=>{
-  const configuration=config({mode:'close',volumeConfirmation:{enabled:true,lookbackCandles:20,minRelativeVolume:1.5}}),env={DB:database(monitor(configuration))},clock={now:START,price:2500,candles:history()};
+  const configuration=config({mode:'close',volumeConfirmation:{enabled:true,lookbackCandles:20,minRelativeVolume:1.5}}),env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(monitor(configuration))},clock={now:START,price:2500,candles:history()};
   await fakeMarket(clock,async()=>{
     await checkOf(env);
     clock.now+=DAY*1000;clock.price=2560;clock.candles.push(candle(D,2560,149));
@@ -138,7 +175,7 @@ test('daily low-volume decisions persist and are not converted to notifications 
 });
 
 test('a fresh proximity warning survives a failed daily request and recovery preserves the daily setup',async()=>{
-  const configuration=config({mode:'retest',proximity:{enabled:true,distancePercent:0.5}}),env={DB:database(monitor(configuration))},clock={now:START,price:2500,candles:[candle(D-DAY,2500)]};
+  const configuration=config({mode:'retest',proximity:{enabled:true,distancePercent:0.5}}),env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(monitor(configuration))},clock={now:START,price:2500,candles:[candle(D-DAY,2500)]};
   await fakeMarket(clock,async()=>{
     await checkOf(env,'codex');clock.now+=DAY*1000;clock.candles.push(candle(D,2560));await checkOf(env,'codex');
     const before=env.DB.read().data,previousCheck=before.background.lastCheck;assert.ok(before.engine.setups.R1);
@@ -152,7 +189,7 @@ test('a fresh proximity warning survives a failed daily request and recovery pre
 });
 
 test('daily request failures without proximity retain the original failed-check contract',async()=>{
-  const env={DB:database(monitor(config({mode:'close'})))};
+  const env={MONITOR_OWNER_ID:'test-owner',MONITOR_SERVICE_TOKEN:'fixture-monitor-service-token-32-characters',DB:database(monitor(config({mode:'close'})))};
   await fakeMarket({now:START,price:2500,candleFailure:'Daily unavailable'},async()=>{
     const response=await worker.fetch(request('check',{source:'codex'},false),env);assert.equal(response.status,503);
     const after=await stateOf(env);assert.equal(after.events.length,0);assert.deepEqual(after.decisions,[]);assert.equal(after.lastEvaluatedCandle,null);assert.match(after.evaluationError,/Daily unavailable/);assert.equal(after.background.enabled,false);

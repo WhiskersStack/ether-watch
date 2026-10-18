@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 const calendarCode=readFileSync(new URL('./worker/calendar.js',import.meta.url),'utf8');
-const {CALENDAR_SOURCES,calendarText,calendarSafeURL,calendarNYTime,calendarUpcoming,calendarParseBlsHTML,calendarParseBlsICS,calendarParseBeaHTML,calendarParseFomcHTML,calendarMainnetLinks,calendarParseMainnetHTML,calendarParseRoadmapHTML,fetchCalendar}=await import('data:text/javascript;base64,'+Buffer.from(calendarCode).toString('base64'));
+const {CALENDAR_SOURCES,calendarText,calendarSafeURL,calendarNYTime,calendarUpcoming,calendarParseBlsHTML,calendarParseBlsICS,calendarParseBlsAnnualHTML,calendarParseBeaHTML,calendarParseFomcHTML,calendarMainnetLinks,calendarParseMainnetHTML,calendarParseRoadmapHTML,fetchCalendar}=await import('data:text/javascript;base64,'+Buffer.from(calendarCode).toString('base64'));
 const now=Date.parse('2026-10-17T12:00:00Z'),request=()=>new Request('https://ether-watch.example/api/calendar');
 const blsRow=(period,date,time)=>'<tr><td>'+period+'</td><td>'+date+'</td><td>'+time+'</td></tr>';
 const blsHTML=(rows=[blsRow('September 2026','Oct. 29, 2026','08:30 AM'),blsRow('October 2026','Nov. 10, 2026','08:30 AM'),blsRow('November 2026','Dec. 10, 2026','08:30 AM')])=>'<h2>Schedule of Releases for the Consumer Price Index</h2><table><tr><th>Reference Month</th><th>Release Date</th><th>Release Time</th></tr>'+rows.join('')+'</table>';
@@ -39,6 +39,34 @@ test('CPI table uses its published release date and time, never the reference pe
   const events=calendarParseBlsHTML(blsHTML());assert.equal(events.length,3);assert.equal(events[0].date,'2026-10-29');assert.equal(events[0].startAt,'2026-10-29T12:30:00.000Z');assert.equal(events[1].startAt,'2026-11-10T13:30:00.000Z');assert.equal(events[0].sourceId,'bls');
   const dateOnly=calendarParseBlsHTML(blsHTML([blsRow('October 2026','Nov. 10, 2026','To be announced')]))[0];assert.equal(dateOnly.startAt,null);assert.equal(dateOnly.timePrecision,'date');
   assert.throws(()=>calendarParseBlsHTML(blsHTML([blsRow('January 2026','Feb. 31, 2026','08:30 AM')])),/unrecognized/);
+});
+const blsAnnualHTML=(year,rows)=>'<title>Schedule of Selected Releases '+year+' : U.S. Bureau of Labor Statistics</title><h1>November '+year+'</h1><table class="release-list"><tr><th>Date</th><th>Time</th><th>Release</th></tr>'+rows.join('')+'</table>';
+test('annual CPI fallback uses explicit release dates, Eastern time and only CPI rows',()=>{
+  const html=blsAnnualHTML(2026,[blsRow('Tuesday, November 10, 2026','08:30 AM','Consumer Price Index for October 2026'),blsRow('Tuesday, November 10, 2026','08:30 AM','Real Earnings for October 2026')]);
+  const events=calendarParseBlsAnnualHTML(html,2026);assert.equal(events.length,1);assert.equal(events[0].date,'2026-11-10');assert.equal(events[0].startAt,'2026-11-10T13:30:00.000Z');assert.equal(events[0].url,'https://www.bls.gov/schedule/2026/home.htm');
+  assert.throws(()=>calendarParseBlsAnnualHTML(html,2027),/unrecognized/);
+  assert.throws(()=>calendarParseBlsAnnualHTML(blsAnnualHTML(2026,[blsRow('November 10','08:30 AM','Consumer Price Index for October 2026')]),2026),/unrecognized/);
+  const dateOnly=calendarParseBlsAnnualHTML(blsAnnualHTML(2026,[blsRow('November 10, 2026','To be announced','Consumer Price Index for October 2026')]),2026)[0];assert.equal(dateOnly.startAt,null);
+});
+test('CPI annual fallback recovers after HTML and iCalendar rejection without changing other sources',async()=>{
+  const annual='https://www.bls.gov/schedule/2026/home.htm',calls=[],overrides={
+    [CALENDAR_SOURCES[0].url]:()=>new Response('Forbidden',{status:403}),
+    'https://www.bls.gov/schedule/news_release/bls.ics':()=>new Response('Forbidden',{status:403}),
+    [annual]:blsAnnualHTML(2026,[blsRow('November 10, 2026','08:30 AM','Consumer Price Index for October 2026')])
+  };
+  const body=await (await fetchCalendar(request(),{fetch:fixtureFetch(overrides,calls),cache:null,now})).json();
+  assert.equal(body.sources[0].status,'ok');assert.match(body.sources[0].warning,/annual schedule/);assert.equal(body.events.find(event=>event.kind==='cpi').startAt,'2026-11-10T13:30:00.000Z');assert.equal(body.sources[1].status,'ok');assert.ok(calls.length<=16);
+});
+test('CPI annual fallback checks both explicit years across New Year and retains a valid partial result',async()=>{
+  const crossing=Date.parse('2026-12-25T12:00:00Z'),calls=[],overrides={
+    [CALENDAR_SOURCES[0].url]:'changed format','https://www.bls.gov/schedule/news_release/bls.ics':'changed format',
+    'https://www.bls.gov/schedule/2026/home.htm':blsAnnualHTML(2026,[blsRow('December 10, 2026','08:30 AM','Consumer Price Index for November 2026')]),
+    'https://www.bls.gov/schedule/2027/home.htm':blsAnnualHTML(2027,[blsRow('January 13, 2027','08:30 AM','Consumer Price Index for December 2026')]),
+    'https://www.bea.gov/news/schedule/next-year':beaHTML(2027,[beaRow('January 29','8:30 AM')])
+  };
+  const body=await (await fetchCalendar(request(),{fetch:fixtureFetch(overrides,calls),cache:null,now:crossing})).json();assert.equal(body.sources[0].status,'ok');assert.equal(body.events.find(event=>event.kind==='cpi').date,'2027-01-13');assert.ok(calls.some(call=>call.url.includes('/2027/home.htm')));
+  overrides['https://www.bls.gov/schedule/2026/home.htm']=()=>new Response('Unavailable',{status:503});
+  const partial=await (await fetchCalendar(request(),{fetch:fixtureFetch(overrides),cache:null,now:crossing})).json();assert.equal(partial.sources[0].status,'ok');assert.match(partial.sources[0].warning,/One schedule year/);assert.equal(partial.events.find(event=>event.kind==='cpi').date,'2027-01-13');
 });
 test('iCalendar handles UTC, known Eastern zones, all-day dates, folding and cancellation',()=>{
   const event=lines=>'BEGIN:VEVENT\r\n'+lines.join('\r\n')+'\r\nEND:VEVENT\r\n';
@@ -107,7 +135,7 @@ test('BLS HTML failure falls back to official iCalendar with an explicit warning
   const body=await (await fetchCalendar(request(),{fetch:fixtureFetch(overrides),cache:null,now})).json(),source=body.sources.find(source=>source.id==='bls');assert.equal(source.status,'ok');assert.match(source.warning,/official iCalendar/);assert.equal(body.partial,true);assert.equal(body.events.filter(event=>event.kind==='cpi').length,1);
 });
 test('changed formats and oversized bodies surface source errors without suppressing other sources',async()=>{
-  const overrides={[CALENDAR_SOURCES[0].url]:'unknown','https://www.bls.gov/schedule/news_release/bls.ics':'unknown',[CALENDAR_SOURCES[1].url]:()=>new Response('large',{headers:{'Content-Length':String(3*1024*1024)}})};
+  const overrides={[CALENDAR_SOURCES[0].url]:'unknown','https://www.bls.gov/schedule/news_release/bls.ics':'unknown','https://www.bls.gov/schedule/2026/home.htm':'unknown',[CALENDAR_SOURCES[1].url]:()=>new Response('large',{headers:{'Content-Length':String(3*1024*1024)}})};
   const response=await fetchCalendar(request(),{fetch:fixtureFetch(overrides),cache:null,now}),body=await response.json();assert.equal(response.status,200);assert.equal(body.partial,true);assert.equal(body.events.some(event=>['cpi','pce'].includes(event.kind)),false);assert.equal(body.sources[0].status,'error');assert.match(body.sources[0].error,/unrecognized/);assert.equal(body.sources[1].status,'error');assert.match(body.sources[1].error,/too large/);assert.equal(body.sources[2].status,'ok');
 });
 test('verified roadmap survives a protocol-source failure with an explicit partial warning',async()=>{
