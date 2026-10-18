@@ -8,7 +8,8 @@ const engine=readFileSync(new URL('./dist/rules.mjs',import.meta.url),'utf8').re
 const source=readFileSync(new URL('./worker/index.js',import.meta.url),'utf8');
 const news=readFileSync(fixture('./worker/news.js'),'utf8').replace(/^export\s+/gm,'');
 const calendar=readFileSync(new URL('./worker/calendar.js',import.meta.url),'utf8').replace(/^export\s+/gm,'');
-const worker=(await import('data:text/javascript;base64,'+Buffer.from('const ASSETS={"/":{body:"fixture",type:"text/html"}};\n'+engine+'\n'+news+'\n'+calendar+'\n'+source).toString('base64'))).default;
+const volume=readFileSync(new URL('./worker/volume.js',import.meta.url),'utf8').replace(/^export\s+/gm,'');
+const worker=(await import('data:text/javascript;base64,'+Buffer.from('const ASSETS={"/":{body:"fixture",type:"text/html"}};\n'+engine+'\n'+news+'\n'+calendar+'\n'+volume+'\n'+source).toString('base64'))).default;
 function database(seed){
   const sqlite=new DatabaseSync(':memory:');
   sqlite.exec(readFileSync(fixture('./drizzle/0000_monitor.sql'),'utf8'));

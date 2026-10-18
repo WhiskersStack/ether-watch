@@ -8,9 +8,10 @@ for(const [url,file,type] of [['/','index.html','text/html;charset=utf-8'],['/in
 const rules=fs.readFileSync(path.join(root,'dist/rules.mjs'),'utf8').replace(/^export\s+/gm,'');
 const news=fs.readFileSync(path.join(root,'worker/news.js'),'utf8').replace(/^export\s+/gm,'');
 const calendar=fs.readFileSync(path.join(root,'worker/calendar.js'),'utf8').replace(/^export\s+/gm,'');
+const volume=fs.readFileSync(path.join(root,'worker/volume.js'),'utf8').replace(/^export\s+/gm,'');
 const worker=fs.readFileSync(path.join(root,'worker/index.js'),'utf8');
 fs.mkdirSync(path.join(target,'server'),{recursive:true});fs.mkdirSync(path.join(target,'.openai'),{recursive:true});
 assets['/calendar-ui.mjs']={body:fs.readFileSync(path.join(root,'dist/calendar-ui.mjs'),'utf8'),type:'text/javascript;charset=utf-8'};
-fs.writeFileSync(path.join(target,'server/index.js'),'const ASSETS='+JSON.stringify(assets)+';\n'+rules+'\n'+news+'\n'+calendar+'\n'+worker);
+fs.writeFileSync(path.join(target,'server/index.js'),'const ASSETS='+JSON.stringify(assets)+';\n'+rules+'\n'+news+'\n'+calendar+'\n'+volume+'\n'+worker);
 fs.writeFileSync(path.join(target,'.openai/hosting.json'),JSON.stringify(manifest,null,2)+'\n');
 console.log('Worker prepared: dist/server/index.js');

@@ -15,7 +15,7 @@ const newsState={data:null,busy:false,visible:6,selected:null};
 const candleFeed=createCandleFeed({fetcher:(url,options)=>fetch(url,{...options,signal:AbortSignal.timeout(12000)})});
 const newsTopics={ethereum:'Ethereum & crypto',macro:'Macro',network:'Network upgrades',etf:'ETFs',regulation:'Regulation',security:'Security'};
 try{legacyPaused=localStorage.getItem('etherwatch-armed')==='false'&&!localStorage.getItem('etherwatch-migrated');}catch{}
-const state = {price:null,candles:[],days:90,armed:true,events:[],decisions:[],lastSuccess:0,lastCandles:0,dailyError:null,busy:false,chartData:[],stats:null,lastStats:0,statsError:null,serverReady:false,canManage:false,canCheck:false,seen:new Set(),bootstrapped:false,background:null,lastCheck:0};
+const state = {price:null,candles:[],days:90,armed:true,events:[],decisions:[],lastSuccess:0,lastCandles:0,dailyError:null,busy:false,chartData:[],stats:null,lastStats:0,statsError:null,aggregateVolume:null,volumeError:null,volumeBusy:false,lastVolumeAttempt:0,serverReady:false,canManage:false,canCheck:false,seen:new Set(),bootstrapped:false,background:null,lastCheck:0};
 const usd = n => Number.isFinite(n) ? n.toLocaleString('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
 const short = n => Number.isFinite(n) ? '$'+Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:2}).format(n) : '—';
 const escapeHTML = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -137,10 +137,27 @@ function readStats(stats){
 }
 function renderStats(){
   const stale=Boolean(state.statsError)||!state.lastStats||Date.now()-state.lastStats>=45000;
-  if(!state.stats){$('change').textContent='24h stats unavailable';$('change').className='muted';$('volume').textContent='—';$('volume-note').textContent='24h stats unavailable';return;}
-  if(state.price){const change=(state.price/state.stats.open-1)*100;$('change').textContent=(change>=0?'↗ +':'↘ ')+change.toFixed(2)+'%'+(stale?' · stale':'');$('change').className=stale?'muted':change>=0?'positive':'negative';$('volume').textContent=short(state.stats.volume*state.price);}
-  $('volume-note').textContent='Coinbase ETH-USD · USD estimate'+(stale?' · stats stale':'');
-  $('change').title=$('volume-note').title=(state.statsError?state.statsError+' · ':'')+'Stats fetched '+new Date(state.lastStats).toLocaleTimeString();
+  if(!state.stats){$('change').textContent='24h stats unavailable';$('change').className='muted';return;}
+  if(state.price){const change=(state.price/state.stats.open-1)*100;$('change').textContent=(change>=0?'↗ +':'↘ ')+change.toFixed(2)+'%'+(stale?' · stale':'');$('change').className=stale?'muted':change>=0?'positive':'negative';}
+  $('change').title=(state.statsError?state.statsError+' · ':'')+'Stats fetched '+new Date(state.lastStats).toLocaleTimeString();
+}
+function renderVolume(){
+  const data=state.aggregateVolume,time=Date.parse(data?.fetchedAt),age=Date.now()-time;
+  const available=data&&Number.isFinite(time)&&age>=0&&age<3600000;
+  const stale=Boolean(state.volumeError)||data?.stale||age>=300000;
+  $('volume').textContent=available?short(data.volumeUsd):'—';
+  $('volume-note').textContent='Aggregate ETH · USD'+(!available?' · unavailable':stale?' · stale':'');
+  $('volume-freshness').textContent=available?'Fetched '+new Date(time).toLocaleTimeString():'Awaiting published statistic';
+  $('volume-note').title=(state.volumeError?state.volumeError+' · ':'')+'TradingView published 24h statistic. Source update time is not supplied.';
+}
+async function refreshVolume(force=false){
+  if(state.volumeBusy||!force&&state.lastVolumeAttempt&&Date.now()-state.lastVolumeAttempt<(state.volumeError?60000:300000))return;
+  state.volumeBusy=true;state.lastVolumeAttempt=Date.now();
+  try{
+    const data=await api('volume'),time=Date.parse(data?.fetchedAt);
+    if(data.asset!=='ETH'||data.currency!=='USD'||data.scope!=='aggregate'||data.source!=='TradingView'||typeof data.volumeUsd!=='number'||!Number.isFinite(data.volumeUsd)||data.volumeUsd<=0||data.volumeUsd>Number.MAX_SAFE_INTEGER||!Number.isFinite(time)||time>Date.now()||Date.now()-time>=3600000)throw new Error('Invalid aggregate volume');
+    state.aggregateVolume=data;state.volumeError=data.stale?data.error||'Source refresh unavailable':null;
+  }catch(error){state.volumeError=error.message;}finally{state.volumeBusy=false;renderVolume();}
 }
 function updatePrice(ticker){const {price,time}=acceptTicker(ticker,Date.now());state.price=price;state.lastSuccess=Date.now();$('price').textContent=usd(price);$('connection').textContent='● Live · 15s updates';$('connection').style.color='var(--green)';$('updated').textContent='Updated '+new Date(time).toLocaleTimeString()+' · Coinbase';renderStats();renderPosition(price);renderLevels();draw();}
 async function refresh(){
@@ -236,7 +253,7 @@ async function refreshNews(){if(newsState.busy)return;newsState.busy=true;$('new
 applyTheme(document.documentElement.dataset.theme, false);
 $('theme-select').addEventListener('change',event=>applyTheme(event.target.value));
 document.querySelectorAll('[data-days]').forEach(button=>button.addEventListener('click',()=>{chartPrefs.bars=Number(button.dataset.days);document.querySelectorAll('[data-days]').forEach(b=>b.classList.toggle('selected',b===button));saveGraphPrefs();priceChart.resetView();}));
-$('refresh').addEventListener('click',async()=>{await loadSettings();await refresh();await refreshGraph(true);await checkAlert();});
+$('refresh').addEventListener('click',async()=>{refreshVolume(true);await loadSettings();await refresh();await refreshGraph(true);await checkAlert();});
 $('chart-timeframe').value=chartPrefs.timeframe;$('chart-type').value=chartPrefs.type;$('chart-scale').value=chartPrefs.scale;$('chart-fit').value=chartPrefs.fit||'levels';
 for(const [id,key] of [['show-profile','profile'],['show-ema','ema'],['show-volume','volume'],['show-levels','levels'],['show-flips','flips'],['show-rsi','rsi'],['show-macd','macd'],['show-news','news']]){$(id).checked=!!chartPrefs[key];$(id).addEventListener('change',()=>{chartPrefs[key]=$(id).checked;saveGraphPrefs();});}
 $('chart-timeframe').addEventListener('change',()=>{chartPrefs.timeframe=Number($('chart-timeframe').value);graphState.generation++;graphState.candles=[];graphState.loadedAt=0;$('chart-empty').style.display='flex';$('chart-empty').textContent='Loading selected chart interval…';saveGraphPrefs();refreshGraph(true);});
@@ -299,4 +316,4 @@ for(const id of ['history-level','history-kind','history-delivery'])$(id).addEve
 for(const id of ['decisions-level','decisions-kind'])$(id).addEventListener('change',renderDecisions);
 $('settings-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;try{const next=readSettings();for(const button of form.querySelectorAll('button'))button.disabled=true;showMonitor(await api('config',{...next,expectedRevision:editingConfig.revision}));$('settings-dialog').close();toast('Levels and alert options saved.');}catch(e){$('settings-error').textContent=e.message;}finally{for(const button of form.querySelectorAll('button'))button.disabled=false;}});
 async function loadSettings(){try{let data=await api('state');if(legacyPaused&&data.access?.canManage&&data.config.revision===1)data=await api('config',{...data.config,armed:false,expectedRevision:1});showMonitor(data);if(data.access?.canManage){legacyPaused=false;try{localStorage.setItem('etherwatch-migrated','1');}catch{}}}catch(e){state.serverReady=false;$('armed-badge').textContent='UNAVAILABLE';$('rule-summary').textContent='Saved monitor service unavailable';$('background-status').textContent='Configuration unavailable';$('background-note').textContent='Live chart data remains available. Alert settings could not be loaded.';}}
-applyConfig(config);renderEvents();loadSettings().then(async()=>{await Promise.all([refresh(),refreshGraph()]);await checkAlert();});setInterval(async()=>{await Promise.all([refresh(),refreshGraph()]);await checkAlert();},15000);setInterval(()=>{if(state.lastSuccess&&Date.now()-state.lastSuccess>45000)feedError('No recent successful update');renderChartFreshness();renderStats();renderDailyFreshness();},5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadSettings();refresh();refreshGraph();refreshNews();}});
+applyConfig(config);renderEvents();refreshVolume();loadSettings().then(async()=>{await Promise.all([refresh(),refreshGraph()]);await checkAlert();});setInterval(async()=>{await Promise.all([refresh(),refreshGraph(),refreshVolume()]);await checkAlert();},15000);setInterval(()=>{if(state.lastSuccess&&Date.now()-state.lastSuccess>45000)feedError('No recent successful update');renderChartFreshness();renderStats();renderVolume();renderDailyFreshness();},5000);document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadSettings();refresh();refreshGraph();refreshNews();refreshVolume();}});
