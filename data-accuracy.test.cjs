@@ -50,7 +50,7 @@ test('one completed candle cannot generate invalid sparkline coordinates',()=>{
   assert.doesNotMatch(ctx.elements.spark.d,/NaN|Infinity/);
 });
 
-const aggregate=()=>({asset:'ETH',currency:'USD',scope:'aggregate',source:'TradingView',volumeUsd:15.52e9,fetchedAt:new Date().toISOString(),stale:false,error:null});
+const aggregate=()=>({asset:'ETH',currency:'USD',scope:'aggregate',source:'TradingView',sourceUrl:'https://www.tradingview.com/symbols/ETHUSD/?exchange=BITSTAMP',volumeUsd:15.52e9,fetchedAt:new Date().toISOString(),stale:false,error:null});
 test('headline uses published aggregate dollars independently of Coinbase price and stats',async()=>{
   const ctx=context();ctx.api=async()=>aggregate();await ctx.refreshVolume();assert.equal(ctx.elements.volume.textContent,'$15.52B');
   ctx.state.price=1;ctx.state.stats={open:1,volume:900000};ctx.state.lastStats=Date.now();ctx.renderStats();assert.equal(ctx.elements.volume.textContent,'$15.52B');
@@ -66,3 +66,5 @@ test('old aggregate snapshots expire and independent polling is throttled',async
   const ctx=context();let calls=0;ctx.api=async()=>{calls++;return aggregate();};await ctx.refreshVolume();await ctx.refreshVolume();assert.equal(calls,1);
   ctx.state.aggregateVolume.fetchedAt=new Date(Date.now()-3600000).toISOString();ctx.renderVolume();assert.equal(ctx.elements.volume.textContent,'—');assert.match(ctx.elements['volume-note'].textContent,/unavailable/i);
 });
+
+test('aggregate fallback names its provider and blocks unapproved source links',async()=>{const ctx=context();ctx.api=async()=>({...aggregate(),source:'CoinGecko',sourceUrl:'https://www.coingecko.com/en/coins/ethereum',volumeUsd:6.7e9});await ctx.refreshVolume(true);assert.equal(ctx.elements.volume.textContent,'$6.7B');assert.equal(ctx.elements['volume-source'].textContent,'CoinGecko');ctx.api=async()=>({...aggregate(),sourceUrl:'javascript:alert(1)'});await ctx.refreshVolume(true);assert.equal(ctx.elements.volume.textContent,'$6.7B');assert.match(ctx.elements['volume-note'].textContent,/stale/);});

@@ -15,7 +15,7 @@ Ether Watch is a responsive ETH/USD dashboard that combines live market data, in
 ### Live Ethereum overview
 
 - Displays the Coinbase Exchange **ETH-USD** spot ticker and 24-hour change.
-- Shows TradingView’s published aggregate Ethereum **24-hour trading volume in USD**, refreshed every five minutes. This is the published ETH statistic, independent of Coinbase exchange volume. Retrieval time is shown; TradingView does not supply its source update time. If retrieval fails, the last value is marked stale and expires after one hour.
+- Shows aggregate Ethereum **24-hour trading volume in USD**, refreshed every five minutes, using TradingView’s aggregate feed with CoinGecko and CoinPaprika fallbacks. The active source and retrieval time are shown. Providers track different markets, so values can differ. Source update time is included when supplied. If retrieval fails, the last value is marked stale and expires after one hour.
 - Refreshes the ticker and overview in the browser, with distinct timestamps for chart and daily-indicator data.
 - Shows the current price relative to editable support and resistance levels.
 - Preserves the last successful data during a feed interruption while clearly marking stale or unavailable values. It does **not** substitute simulated prices.
@@ -66,7 +66,7 @@ News categorization and chart markers provide context; they do **not** establish
 | Layer | Implementation |
 | --- | --- |
 | Frontend | HTML5, CSS3, vanilla JavaScript (ES modules), Canvas |
-| Market data | Coinbase Exchange REST endpoints; TradingView published ETH volume statistic |
+| Market data | Coinbase Exchange REST endpoints; TradingView / CoinGecko / CoinPaprika aggregate ETH volume |
 | Backend | Dependency-free JavaScript Sites Worker |
 | Persistence | Managed D1 database, single monitor record with optimistic updates |
 | News / calendar | RSS/Atom feeds and official publisher or agency pages |

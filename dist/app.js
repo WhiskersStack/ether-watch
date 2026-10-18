@@ -148,14 +148,17 @@ function renderVolume(){
   $('volume').textContent=available?short(data.volumeUsd):'—';
   $('volume-note').textContent='Aggregate ETH · USD'+(!available?' · unavailable':stale?' · stale':'');
   $('volume-freshness').textContent=available?'Fetched '+new Date(time).toLocaleTimeString():'Awaiting published statistic';
-  $('volume-note').title=(state.volumeError?state.volumeError+' · ':'')+'TradingView published 24h statistic. Source update time is not supplied.';
+  $('volume-source').textContent=data?.source||'Volume source';
+  if(data?.sourceUrl)$('volume-source').href=data.sourceUrl;
+  $('volume-note').title=(state.volumeError?state.volumeError+' · ':'')+'Aggregate Ethereum 24h trading volume in USD.'+(data?.sourceUpdatedAt?' Source updated '+new Date(data.sourceUpdatedAt).toLocaleString():' Source update time is not supplied.');
 }
 async function refreshVolume(force=false){
   if(state.volumeBusy||!force&&state.lastVolumeAttempt&&Date.now()-state.lastVolumeAttempt<(state.volumeError?60000:300000))return;
   state.volumeBusy=true;state.lastVolumeAttempt=Date.now();
   try{
     const data=await api('volume'),time=Date.parse(data?.fetchedAt);
-    if(data.asset!=='ETH'||data.currency!=='USD'||data.scope!=='aggregate'||data.source!=='TradingView'||typeof data.volumeUsd!=='number'||!Number.isFinite(data.volumeUsd)||data.volumeUsd<=0||data.volumeUsd>Number.MAX_SAFE_INTEGER||!Number.isFinite(time)||time>Date.now()||Date.now()-time>=3600000)throw new Error('Invalid aggregate volume');
+    const sources={TradingView:'https://www.tradingview.com/symbols/ETHUSD/?exchange=BITSTAMP',CoinGecko:'https://www.coingecko.com/en/coins/ethereum',CoinPaprika:'https://coinpaprika.com/coin/eth-ethereum/'};
+    if(data.asset!=='ETH'||data.currency!=='USD'||data.scope!=='aggregate'||(!Object.hasOwn(sources,data.source)||data.sourceUrl!==sources[data.source])||typeof data.volumeUsd!=='number'||!Number.isFinite(data.volumeUsd)||data.volumeUsd<=0||data.volumeUsd>Number.MAX_SAFE_INTEGER||!Number.isFinite(time)||time>Date.now()||Date.now()-time>=3600000)throw new Error('Invalid aggregate volume');
     state.aggregateVolume=data;state.volumeError=data.stale?data.error||'Source refresh unavailable':null;
   }catch(error){state.volumeError=error.message;}finally{state.volumeBusy=false;renderVolume();}
 }
