@@ -83,3 +83,5 @@
 input::placeholder{color:var(--muted);opacity:1}
 .ema-fast{background:var(--ema-fast)}
 @media(max-width:850px){.theme-control{margin:0 0 0 auto;gap:4px;width:120px;flex-shrink:0}aside{gap:12px}.theme-control select{padding:7px 9px}}
+@media(max-width:380px){aside{gap:8px}.brand{font-size:18px;white-space:nowrap}.mark{font-size:25px;margin-right:5px}.theme-control{width:104px}}
+@media(max-width:360px){.metrics{grid-template-columns:minmax(0,1fr)}}
