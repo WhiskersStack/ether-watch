@@ -5,6 +5,7 @@ export const CALENDAR_SOURCES = Object.freeze([
   {id:'fed',name:'Federal Reserve',url:'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm',domains:['www.federalreserve.gov','federalreserve.gov']},
   {id:'ethereum',name:'Ethereum official sources',url:'https://blog.ethereum.org/category/protocol',domains:['blog.ethereum.org','ethereum.org','www.ethereum.org']}
 ]);
+const calendarFredSource={id:'bls',name:'St. Louis Fed / FRED (BLS CPI schedule)',url:'https://fred.stlouisfed.org/releases/calendar?rid=10',domains:['fred.stlouisfed.org']};
 const calendarFreshMs=6*60*60*1000,calendarStaleMs=24*60*60*1000,calendarWindowMs=30*24*60*60*1000;
 const calendarMaxBytes=2*1024*1024,calendarMaxEvents=200,calendarMaxRequests=16;
 const calendarMonths=['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
@@ -19,18 +20,20 @@ function calendarMonthDate(value,year){const match=calendarText(value).match(/\b
 function calendarClock(value){const match=calendarText(value).match(/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\b/i);if(!match)return null;let hour=Number(match[1]);const minute=Number(match[2]),second=Number(match[3]??0),period=match[4]?.toLowerCase().replaceAll('.','');if(period){if(hour<1||hour>12)return null;hour=hour%12+(period==='pm'?12:0);}return hour<24&&minute<60&&second<60?{hour,minute,second}:null;}
 function calendarZoneParts(time,zone){const parts=new Intl.DateTimeFormat('en-CA',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date(time));return Object.fromEntries(parts.filter(part=>part.type!=='literal').map(part=>[part.type,Number(part.value)]));}
 function calendarUTC(date,clock){if(!date||!clock)return null;const [year,month,day]=date.split('-').map(Number);return new Date(Date.UTC(year,month-1,day,clock.hour,clock.minute,clock.second)).toISOString();}
-export function calendarNYTime(date,clock){
+function calendarLocalTime(date,clock,zone){
   if(!/^\d{4}-\d{2}-\d{2}$/.test(date??'')||!clock)return null;
   const [year,month,day]=date.split('-').map(Number);if(calendarDate(year,month,day)!==date||!Number.isInteger(clock.hour)||clock.hour<0||clock.hour>23||!Number.isInteger(clock.minute)||clock.minute<0||clock.minute>59||!Number.isInteger(clock.second??0)||clock.second<0||clock.second>59)return null;
   const second=clock.second??0,guess=Date.UTC(year,month-1,day,clock.hour,clock.minute,second),offsets=new Set(),matches=[];
-  for(const delta of [-43200000,43200000]){const time=guess+delta,parts=calendarZoneParts(time,'America/New_York');offsets.add(Date.UTC(parts.year,parts.month-1,parts.day,parts.hour,parts.minute,parts.second)-time);}
-  for(const offset of offsets){const time=guess-offset,parts=calendarZoneParts(time,'America/New_York');if(parts.year===year&&parts.month===month&&parts.day===day&&parts.hour===clock.hour&&parts.minute===clock.minute&&parts.second===second)matches.push(time);}
+  for(const delta of [-43200000,43200000]){const time=guess+delta,parts=calendarZoneParts(time,zone);offsets.add(Date.UTC(parts.year,parts.month-1,parts.day,parts.hour,parts.minute,parts.second)-time);}
+  for(const offset of offsets){const time=guess-offset,parts=calendarZoneParts(time,zone);if(parts.year===year&&parts.month===month&&parts.day===day&&parts.hour===clock.hour&&parts.minute===clock.minute&&parts.second===second)matches.push(time);}
   // A missing or repeated local hour is not an exact time we can safely assert.
   return matches.length===1?new Date(matches[0]).toISOString():null;
 }
-function calendarEvent(source,kind,title,date,clock=null,zone='America/New_York',url=source.url,endDate=null){const startAt=zone==='UTC'?calendarUTC(date,clock):zone==='America/New_York'?calendarNYTime(date,clock):null;return {id:source.id+':'+kind+':'+date+':'+title,title:calendarText(title).slice(0,200),kind,status:'scheduled',source:source.name,sourceId:source.id,url:calendarSafeURL(url,source)??source.url,date,endDate:endDate??date,startAt,timeZone:zone,timePrecision:startAt?'time':'date',context:kind==='cpi'||kind==='pce'?'Official inflation-related release. Market reactions depend on the released data and expectations.':kind==='fomc'?'Official meeting dates; the calendar does not verify an exact decision time. Meeting dates can change.':'Official mainnet activation announcement. This schedule does not predict an ETH price effect.'};}
+export function calendarNYTime(date,clock){return calendarLocalTime(date,clock,'America/New_York');}
+export function calendarChicagoTime(date,clock){return calendarLocalTime(date,clock,'America/Chicago');}
+function calendarEvent(source,kind,title,date,clock=null,zone='America/New_York',url=source.url,endDate=null){const startAt=zone==='UTC'?calendarUTC(date,clock):['America/New_York','America/Chicago'].includes(zone)?calendarLocalTime(date,clock,zone):null;return {id:source.id+':'+kind+':'+date+':'+title,title:calendarText(title).slice(0,200),kind,status:'scheduled',source:source.name,sourceId:source.id,url:calendarSafeURL(url,source)??source.url,date,endDate:endDate??date,startAt,timeZone:zone,timePrecision:startAt?'time':'date',context:kind==='cpi'||kind==='pce'?'Official inflation-related release. Market reactions depend on the released data and expectations.':kind==='fomc'?'Official meeting dates; the calendar does not verify an exact decision time. Meeting dates can change.':'Official mainnet activation announcement. This schedule does not predict an ETH price effect.'};}
 function calendarClassBody(html,className){const match=html.match(new RegExp('<([a-z][\\w-]*)\\b[^>]*class=["\x27][^"\x27]*\\b'+className+'\\b[^"\x27]*["\x27][^>]*>([\\s\\S]*?)<\\/\\1\\s*>','i'));return match?.[2]??'';}
-function calendarUnique(events){const ids=new Set();return events.filter(event=>event.date&&calendarSafeURL(event.url,CALENDAR_SOURCES.find(source=>source.id===event.sourceId))).sort((a,b)=>a.date.localeCompare(b.date)||(a.startAt??'').localeCompare(b.startAt??'')).filter(event=>{if(ids.has(event.id))return false;ids.add(event.id);return true;}).slice(0,calendarMaxEvents);}
+function calendarUnique(events){const ids=new Set();return events.filter(event=>{const source=event.sourceId==='bls'&&event.source===calendarFredSource.name?calendarFredSource:CALENDAR_SOURCES.find(source=>source.id===event.sourceId);return event.date&&source&&calendarSafeURL(event.url,source);}).sort((a,b)=>a.date.localeCompare(b.date)||(a.startAt??'').localeCompare(b.startAt??'')).filter(event=>{if(ids.has(event.id))return false;ids.add(event.id);return true;}).slice(0,calendarMaxEvents);}
 export function calendarUpcoming(events,now=Date.now()){
   const today=calendarZoneParts(now,'America/New_York'),end=calendarZoneParts(now+calendarWindowMs,'America/New_York');
   const firstDate=calendarDate(today.year,today.month,today.day),lastDate=calendarDate(end.year,end.month,end.day);
@@ -68,6 +71,28 @@ export function calendarParseBlsAnnualHTML(html,year){
   }
   if(!events.length)throw new Error('Official calendar format is unrecognized');
   return calendarUnique(events);
+}
+export function calendarParseFredHTML(html,year){
+  html=calendarCheckedText(html);const title=calendarText(html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i)?.[1]),text=calendarText(html);
+  if(!Number.isInteger(year)||title!==year+' Economic Release Calendar - Consumer Price Index | FRED | St. Louis Fed'||!/\bAll times are US Central Time\./.test(text))throw new Error('Official calendar format is unrecognized');
+  const tables=[...html.matchAll(/<table\b[^>]*>([\s\S]*?)<\/table>/gi)].filter(table=>/Sort By:\s*(?:Date\s*\|\s*Name|Name\s*\|\s*Date)/.test(calendarText(table[1])));
+  if(tables.length!==1)throw new Error('Official calendar format is unrecognized');
+  const events=[],times=new Map(),url=calendarFredSource.url+'&y='+year;let date=null;
+  for(const row of tables[0][1].matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/gi)){
+    const cells=[...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/gi)];if(!cells.length)continue;
+    if(cells.length===1){
+      date=null;const label=calendarText(cells[0][1]),day=label.match(/^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\s+([A-Za-z]+\s+\d{1,2},\s+20\d{2})(?:\s+Updated)?$/);
+      if(!day)throw new Error('Official calendar format is unrecognized');
+      date=calendarMonthDate(day[2]);if(!date||Number(date.slice(0,4))!==year||new Intl.DateTimeFormat('en-US',{timeZone:'UTC',weekday:'long'}).format(new Date(date+'T12:00:00Z'))!==day[1])throw new Error('Official calendar format is unrecognized');continue;
+    }
+    const links=[...row[1].matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/gi)],cpi=links.filter(link=>calendarText(link[1])==='Consumer Price Index');if(!cpi.length)continue;
+    const link=cpi.length===1?calendarSafeURL(calendarAttribute(cpi[0][0],'href'),calendarFredSource):null,target=link?new URL(link):null,clockText=calendarText(cells[0][1]);
+    if(cells.length!==2||calendarText(cells[1][1])!=='Consumer Price Index'||!date||!target||target.pathname!=='/release'||target.searchParams.get('rid')!=='10'||!/^\d{1,2}:\d{2}\s*(?:am|pm)$/i.test(clockText))throw new Error('Official calendar format is unrecognized');
+    const clock=calendarClock(clockText),startAt=calendarChicagoTime(date,clock);if(!startAt)throw new Error('Official calendar format is unrecognized');
+    if(times.has(date)&&times.get(date)!==startAt)throw new Error('Official CPI calendar has conflicting times');times.set(date,startAt);
+    events.push(calendarEvent(calendarFredSource,'cpi','Consumer Price Index',date,clock,'America/Chicago',url));
+  }
+  if(!events.length)throw new Error('Official calendar format is unrecognized');return calendarUnique(events);
 }
 export function calendarParseBeaHTML(html){
   html=calendarCheckedText(html);const source=CALENDAR_SOURCES[1],text=calendarText(html),year=text.match(/\bYear\s+(20\d{2})\b/)?.[1];
@@ -110,8 +135,11 @@ async function calendarReadSource(source,fetcher,now,budget){
     try{return {events:calendarParseBlsICS(await calendarFetchText('https://www.bls.gov/schedule/news_release/bls.ics',source,fetcher,budget)),roadmap:[],warning:'CPI HTML schedule unavailable; using the official iCalendar.'};}catch{}
     const first=new Date(now).getUTCFullYear(),last=new Date(now+calendarWindowMs).getUTCFullYear(),years=first===last?[first]:[first,last];
     const results=await Promise.allSettled(years.map(year=>calendarFetchText('https://www.bls.gov/schedule/'+year+'/home.htm',source,fetcher,budget).then(html=>calendarParseBlsAnnualHTML(html,year))));
-    const valid=results.filter(result=>result.status==='fulfilled');if(!valid.length)throw results[0].reason;
-    return {events:calendarUnique(valid.flatMap(result=>result.value)),roadmap:[],warning:'CPI HTML and iCalendar unavailable; using the official annual schedule.'+(valid.length<results.length?' One schedule year is unavailable.':'')};
+    const valid=results.filter(result=>result.status==='fulfilled');
+    if(valid.length)return {events:calendarUnique(valid.flatMap(result=>result.value)),roadmap:[],warning:'CPI HTML and iCalendar unavailable; using the official annual schedule.'+(valid.length<results.length?' One schedule year is unavailable.':'')};
+    const fred=await Promise.allSettled(years.map(async year=>{const url=calendarFredSource.url+'&y='+year;return {url,events:calendarParseFredHTML(await calendarFetchText(url,calendarFredSource,fetcher,budget),year)};})),verified=fred.filter(result=>result.status==='fulfilled');
+    if(!verified.length)throw new Error('Official CPI calendars unavailable');
+    return {events:calendarUnique(verified.flatMap(result=>result.value.events)),roadmap:[],provider:'fred',sourceUrl:verified[0].value.url,warning:'Direct BLS schedules unavailable; using the St. Louis Fed / FRED calendar of BLS CPI releases.'+(verified.length<fred.length?' One FRED schedule year is unavailable.':'')};
   }
   if(source.id==='bea'){const urls=[source.url];if(new Date(now+calendarWindowMs).getUTCFullYear()!==new Date(now).getUTCFullYear())urls.push('https://www.bea.gov/news/schedule/next-year');const results=await Promise.allSettled(urls.map(url=>calendarFetchText(url,source,fetcher,budget).then(calendarParseBeaHTML))),valid=results.filter(result=>result.status==='fulfilled');if(!valid.length)throw results[0].reason;return {events:calendarUnique(valid.flatMap(result=>result.value)),roadmap:[],warning:valid.length<results.length?'One BEA schedule year is unavailable.':null};}
   if(source.id==='fed')return {events:calendarParseFomcHTML(await calendarFetchText(source.url,source,fetcher,budget)),roadmap:[],warning:null};
@@ -126,9 +154,9 @@ async function calendarReadSource(source,fetcher,now,budget){
 }
 function calendarFailure(error){return ['TimeoutError','AbortError'].includes(error?.name)?'Official calendar request timed out':/^(HTTP \d{3}|Official [A-Za-z ]+\.?$)/.test(error?.message??'')?error.message:'Official calendar request failed';}
 async function calendarLoadSource(source,request,deps,now,budget){
-  const cache=deps.cache===undefined?globalThis.caches?.default:deps.cache,key=new Request(new URL('/__ether-watch-calendar/v1/'+source.id,request.url).href),metadata={id:source.id,name:source.name,url:source.url};let previous=null;
+  const cache=deps.cache===undefined?globalThis.caches?.default:deps.cache,key=new Request(new URL('/__ether-watch-calendar/v2/'+source.id,request.url).href),metadata={id:source.id,name:source.name,url:source.url};let previous=null;
   if(cache){try{const response=await cache.match(key);if(response){const data=await response.json(),time=Date.parse(data.fetchedAt);if(Array.isArray(data.events)&&Array.isArray(data.roadmap)&&Number.isFinite(time)&&time<=now&&now-time<=calendarStaleMs)previous=data;}}catch{/* Unavailable edge cache does not block official sources. */}}
-  const result=(data,status,error=null)=>{const events=calendarUpcoming(data?.events??[],now),roadmap=(data?.roadmap??[]).slice(0,3);return {events,roadmap,source:{...metadata,status,fetchedAt:data?.fetchedAt??null,lastAttemptAt:status==='ok'?(data?.fetchedAt??new Date(now).toISOString()):new Date(now).toISOString(),error,warning:data?.warning??null,eventCount:events.length,roadmapCount:roadmap.length}};};
+  const result=(data,status,error=null)=>{const events=calendarUpcoming(data?.events??[],now),roadmap=(data?.roadmap??[]).slice(0,3),provenance=source.id==='bls'&&data?.provider==='fred'&&calendarSafeURL(data.sourceUrl,calendarFredSource)?{name:calendarFredSource.name,url:data.sourceUrl}:{};return {events,roadmap,source:{...metadata,...provenance,status,fetchedAt:data?.fetchedAt??null,lastAttemptAt:status==='ok'?(data?.fetchedAt??new Date(now).toISOString()):new Date(now).toISOString(),error,warning:data?.warning??null,eventCount:events.length,roadmapCount:roadmap.length}};};
   if(previous&&now-Date.parse(previous.fetchedAt)<calendarFreshMs)return result(previous,'ok');
   try{const data={...await calendarReadSource(source,deps.fetch??globalThis.fetch,now,budget),fetchedAt:new Date(now).toISOString()};if(cache){try{await cache.put(key,Response.json(data,{headers:{'Cache-Control':'public,max-age=86400'}}));}catch{/* Verified official data remains usable without cache persistence. */}}return result(data,'ok');}catch(error){return result(previous,previous?'stale':'error',calendarFailure(error));}
 }

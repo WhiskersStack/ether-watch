@@ -1,25 +1,23 @@
-// Aggregate ETH turnover in USD. Never substitute exchange base-asset volume.
-export const AGGREGATE_VOLUME_SOURCES=Object.freeze([
-  {id:'tradingview',name:'TradingView',url:'https://scanner.tradingview.com/coin/scan',page:'https://www.tradingview.com/symbols/ETHUSD/?exchange=BITSTAMP'},
-  {id:'coingecko',name:'CoinGecko',url:'https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd&include_24hr_vol=true&include_last_updated_at=true',page:'https://www.coingecko.com/en/coins/ethereum'},
-  {id:'coinpaprika',name:'CoinPaprika',url:'https://api.coinpaprika.com/v1/tickers/eth-ethereum?quotes=USD',page:'https://coinpaprika.com/coin/eth-ethereum/'}
-]);
-const volumeFreshMs=300000,volumeStaleMs=3600000,volumeMaxBytes=65536;
-export function parseAggregateVolume(data,source,now=Date.now()){
-  let volumeUsd,updated;
-  if(source.id==='tradingview'){
-    const row=data?.data?.[0];
-    if(data?.totalCount!==1||data.data.length!==1||row?.s!=='CRYPTO:ETHUSD'||!Array.isArray(row.d)||row.d.length!==1)throw new Error('Invalid aggregate ETH volume');
-    volumeUsd=row.d[0];
-  }else if(source.id==='coingecko'){
-    volumeUsd=data?.ethereum?.usd_24h_vol;updated=data?.ethereum?.last_updated_at*1000;
-  }else if(source.id==='coinpaprika'){
-    if(data?.id!=='eth-ethereum'||data.symbol!=='ETH')throw new Error('Invalid aggregate ETH volume');
-    volumeUsd=data.quotes?.USD?.volume_24h;updated=Date.parse(data.last_updated);
-  }else throw new Error('Unknown aggregate volume source');
-  if(typeof volumeUsd!=='number'||!Number.isFinite(volumeUsd)||volumeUsd<=0||volumeUsd>Number.MAX_SAFE_INTEGER)throw new Error('Invalid aggregate ETH volume');
-  if(source.id!=='tradingview'&&(!Number.isFinite(updated)||updated>now+60000||now-updated>=volumeStaleMs))throw new Error('Aggregate volume source timestamp unavailable or stale');
-  return {volumeUsd,sourceUpdatedAt:updated?new Date(updated).toISOString():null};
+// One documented ETH spot-volume provider, with a D1 cache shared by every origin.
+export const CMC_VOLUME_SOURCE=Object.freeze({id:'coinmarketcap',name:'CoinMarketCap',url:'https://pro-api.coinmarketcap.com/v3/cryptocurrency/quotes/latest?id=1027&convert=USD',publicUrl:'https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/quotes/latest?id=1027&convert=USD',page:'https://coinmarketcap.com/currencies/ethereum/'});
+const volumeCacheKey='eth-usd-cmc-spot-v1',volumeFreshMs=300000,volumeStaleMs=3600000,volumeFailureMs=900000,volumeMaxBytes=65536;
+function volumeTime(value){
+  if(typeof value!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value))return NaN;
+  const time=Date.parse(value);return Number.isFinite(time)&&new Date(time).toISOString()===(value.includes('.')?value:value.replace('Z','.000Z'))?time:NaN;
+}
+export function parseCoinMarketCapVolume(payload,now=Date.now()){
+  if(![0,'0'].includes(payload?.status?.error_code)||!Array.isArray(payload.data)||payload.data.length!==1)throw new Error('Invalid CoinMarketCap ETH volume response');
+  const coin=payload.data[0];
+  if(coin?.id!==1027||coin.symbol!=='ETH'||!Array.isArray(coin.quote)||coin.quote.length!==1)throw new Error('Invalid CoinMarketCap ETH volume response');
+  const quote=coin.quote[0],volumeUsd=quote?.volume_24h,updated=volumeTime(quote?.last_updated);
+  if(quote?.symbol!=='USD'||quote.id!==2781||typeof volumeUsd!=='number'||!Number.isFinite(volumeUsd)||volumeUsd<=0||volumeUsd>Number.MAX_SAFE_INTEGER)throw new Error('Invalid CoinMarketCap ETH volume response');
+  if(!Number.isFinite(updated)||updated>now+60000||now-updated>=volumeStaleMs)throw new Error('CoinMarketCap volume timestamp unavailable or stale');
+  return {volumeUsd,sourceUpdatedAt:new Date(updated).toISOString()};
+}
+function volumeSnapshot(raw,now){
+  try{const data=JSON.parse(raw),fetched=volumeTime(data.fetchedAt),updated=volumeTime(data.sourceUpdatedAt);
+    return typeof data.volumeUsd==='number'&&Number.isFinite(data.volumeUsd)&&data.volumeUsd>0&&data.volumeUsd<=Number.MAX_SAFE_INTEGER&&Number.isFinite(fetched)&&Number.isFinite(updated)&&fetched<=now+60000&&updated<=now+60000&&updated<=fetched+60000&&now-fetched<volumeStaleMs&&now-updated<volumeStaleMs?data:null;
+  }catch{return null;}
 }
 async function volumeReadBody(response){
   if(Number(response.headers.get('Content-Length'))>volumeMaxBytes)throw new Error('Volume response is too large');
@@ -27,25 +25,54 @@ async function volumeReadBody(response){
   const decoder=new TextDecoder(),parts=[];let bytes=0;
   try{while(true){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>volumeMaxBytes){await reader.cancel();throw new Error('Volume response is too large');}parts.push(decoder.decode(value,{stream:true}));}parts.push(decoder.decode());return JSON.parse(parts.join(''));}finally{reader.releaseLock();}
 }
-export async function fetchVolume(request,now=Date.now()){
-  const headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
-  if(request.method!=='GET')return Response.json({error:'Method not allowed'},{status:405,headers:{...headers,Allow:'GET'}});
-  const cache=globalThis.caches?.default,key=new Request(new URL('/__ether-watch-volume/v2',request.url).href);let previous=null;
-  if(cache){try{const stored=await cache.match(key);if(stored){const data=await stored.json(),time=Date.parse(data.fetchedAt);if(AGGREGATE_VOLUME_SOURCES.some(s=>s.id===data.sourceId)&&typeof data.volumeUsd==='number'&&Number.isFinite(data.volumeUsd)&&data.volumeUsd>0&&data.volumeUsd<=Number.MAX_SAFE_INTEGER&&Number.isFinite(time)&&time<=now&&now-time<volumeStaleMs)previous=data;}}catch{/* A cache miss must not block live sources. */}}
-  const respond=(data,stale,error=null)=>{const source=AGGREGATE_VOLUME_SOURCES.find(s=>s.id===data?.sourceId);return Response.json({asset:'ETH',currency:'USD',scope:'aggregate',source:source?.name??null,sourceId:source?.id??null,sourceUrl:source?.page??null,sourceUpdatedAt:data?.sourceUpdatedAt??null,volumeUsd:data?.volumeUsd??null,fetchedAt:data?.fetchedAt??null,checkedAt:new Date(now).toISOString(),stale,error},{status:data?200:503,headers});};
-  if(previous&&now-Date.parse(previous.fetchedAt)<volumeFreshMs)return respond(previous,false);
-  for(const source of AGGREGATE_VOLUME_SOURCES){
-    try{
-      const options={signal:AbortSignal.timeout(4000),redirect:'manual',headers:{Accept:'application/json'}};
-      if(source.id==='tradingview'){options.method='POST';options.headers['Content-Type']='application/json';options.body=JSON.stringify({symbols:{tickers:['CRYPTO:ETHUSD'],query:{types:[]}},columns:['24h_vol_cmc']});}
-      const response=await fetch(source.url,options);
-      if(response.status>=300&&response.status<400)throw new Error('Unexpected volume redirect');
-      if(!response.ok)throw new Error('HTTP '+response.status);
-      if(response.url&&response.url!==source.url)throw new Error('Unexpected volume redirect');
-      const data={...parseAggregateVolume(await volumeReadBody(response),source,now),sourceId:source.id,fetchedAt:new Date(now).toISOString()};
-      if(cache){try{await cache.put(key,Response.json(data,{headers:{'Cache-Control':'public,max-age=3600'}}));}catch{/* Fresh data remains valid without a cache write. */}}
-      return respond(data,false);
-    }catch(error){console.warn('Aggregate volume source failed:',source.name,error?.name,error?.message);}
+function volumeRetryAt(value,now){
+  if(typeof value!=='string'||value.length>100)return 0;
+  if(/^\d+$/.test(value.trim())){const seconds=Number(value);return Number.isFinite(seconds)?Math.min(Number.MAX_SAFE_INTEGER,now+seconds*1000):0;}
+  const time=Date.parse(value);return Number.isFinite(time)&&time>now?time:0;
+}
+function volumeFailure(error){return ['TimeoutError','AbortError'].includes(error?.name)?'CoinMarketCap volume request timed out':/^(HTTP \d{3}|Unexpected volume redirect|Volume response is too large|Empty volume response|Invalid CoinMarketCap ETH volume response|CoinMarketCap volume timestamp unavailable or stale)$/.test(error?.message??'')?error.message:'CoinMarketCap volume unavailable';}
+export async function fetchVolume(request,env={},deps={}){
+  const baseHeaders={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'};
+  if(request.method!=='GET')return Response.json({error:'Method not allowed'},{status:405,headers:{...baseHeaders,Allow:'GET'}});
+  const clock=()=>typeof deps.now==='function'?deps.now():deps.now??Date.now();
+  const respond=(data,error=null,retryAt=0)=>{
+    const now=clock(),snapshot=data?volumeSnapshot(JSON.stringify(data),now):null;
+    const delayed=snapshot&&(now-volumeTime(snapshot.fetchedAt)>=volumeFreshMs||now-volumeTime(snapshot.sourceUpdatedAt)>=volumeFreshMs);
+    return Response.json({asset:'ETH',currency:'USD',scope:'aggregate',source:CMC_VOLUME_SOURCE.name,sourceId:CMC_VOLUME_SOURCE.id,sourceUrl:CMC_VOLUME_SOURCE.page,sourceUpdatedAt:snapshot?.sourceUpdatedAt??null,volumeUsd:snapshot?.volumeUsd??null,fetchedAt:snapshot?.fetchedAt??null,checkedAt:new Date(now).toISOString(),stale:!snapshot||Boolean(error)||Boolean(delayed),error:error||(delayed?'CoinMarketCap volume is awaiting refresh':snapshot?null:'CoinMarketCap volume unavailable')},{status:snapshot?200:503,headers:{...baseHeaders,...(!snapshot&&retryAt>now?{'Retry-After':String(Math.max(1,Math.ceil((retryAt-now)/1000)))}:{})}});
+  };
+  if(!env.DB)return respond(null,'Volume cache unavailable');
+  const db=typeof env.DB.withSession==='function'?env.DB.withSession('first-primary'):env.DB;
+  const load=()=>db.prepare('SELECT data, next_attempt_at, lease_until, last_error FROM market_data_cache WHERE cache_key = ?').bind(volumeCacheKey).first();
+  let row,previous;
+  try{
+    await db.prepare('INSERT OR IGNORE INTO market_data_cache (cache_key) VALUES (?)').bind(volumeCacheKey).run();
+    row=await load();if(!row)throw new Error('Missing volume cache');previous=volumeSnapshot(row.data,clock());
+  }catch{return respond(null,'Volume cache unavailable');}
+  const key=env.CMC_API_KEY,hasKey=typeof key==='string'&&key.trim().length>0&&key.length<=1024&&!/[\r\n]/.test(key);
+  const publicMode=!hasKey&&env.CMC_USE_PUBLIC_API==='true';
+  if(!hasKey&&!publicMode)return respond(previous,'Volume source is not configured');
+  let now=clock();
+  if(row.next_attempt_at>now||row.lease_until>now)return respond(previous,row.last_error||(!previous?'Volume refresh in progress':null),Math.max(row.next_attempt_at,row.lease_until));
+  const token=crypto.randomUUID();
+  try{
+    const acquired=await db.prepare('UPDATE market_data_cache SET next_attempt_at = ?, lease_until = ?, lease_token = ? WHERE cache_key = ? AND next_attempt_at <= ? AND lease_until <= ?').bind(now+volumeFreshMs,now+30000,token,volumeCacheKey,now,now).run();
+    if(acquired.meta?.changes!==1){row=await load();return respond(volumeSnapshot(row?.data,clock()),row?.last_error||(!row?.data?'Volume refresh in progress':null),Math.max(row?.next_attempt_at??0,row?.lease_until??0));}
+  }catch{return respond(previous,'Volume cache unavailable');}
+  let retryAt=0;
+  try{
+    const url=publicMode?CMC_VOLUME_SOURCE.publicUrl:CMC_VOLUME_SOURCE.url;
+    const response=await(deps.fetch??globalThis.fetch)(url,{signal:AbortSignal.timeout(12000),redirect:'manual',headers:{Accept:'application/json',...(hasKey?{'X-CMC_PRO_API_KEY':key}:{})}});
+    retryAt=volumeRetryAt(response.headers.get('Retry-After'),clock());
+    if(response.status>=300&&response.status<400)throw new Error('Unexpected volume redirect');
+    if(!response.ok)throw new Error('HTTP '+response.status);
+    if(response.url&&response.url!==url)throw new Error('Unexpected volume redirect');
+    const parsed=parseCoinMarketCapVolume(await volumeReadBody(response),clock()),data={...parsed,fetchedAt:new Date(clock()).toISOString()};
+    const saved=await db.prepare('UPDATE market_data_cache SET data = ?, next_attempt_at = ?, lease_until = 0, lease_token = NULL, last_error = NULL WHERE cache_key = ? AND lease_token = ?').bind(JSON.stringify(data),Math.max(now+volumeFreshMs,clock()+volumeFreshMs),volumeCacheKey,token).run();
+    if(saved.meta?.changes!==1)throw new Error('Volume cache changed');
+    return respond(data);
+  }catch(error){
+    const failure=volumeFailure(error),nextAttempt=Math.max(clock()+volumeFailureMs,retryAt,now+volumeFreshMs);
+    try{await db.prepare('UPDATE market_data_cache SET next_attempt_at = ?, lease_until = 0, lease_token = NULL, last_error = ? WHERE cache_key = ? AND lease_token = ?').bind(nextAttempt,failure,volumeCacheKey,token).run();}catch{return respond(previous,'Volume cache unavailable',nextAttempt);}
+    return respond(previous,failure,nextAttempt);
   }
-  return respond(previous,true,'Aggregate volume sources unavailable');
 }

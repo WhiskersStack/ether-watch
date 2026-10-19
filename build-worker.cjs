@@ -14,4 +14,5 @@ fs.mkdirSync(path.join(target,'server'),{recursive:true});fs.mkdirSync(path.join
 assets['/calendar-ui.mjs']={body:fs.readFileSync(path.join(root,'dist/calendar-ui.mjs'),'utf8'),type:'text/javascript;charset=utf-8'};
 fs.writeFileSync(path.join(target,'server/index.js'),'const ASSETS='+JSON.stringify(assets)+';\n'+rules+'\n'+news+'\n'+calendar+'\n'+volume+'\n'+worker);
 fs.writeFileSync(path.join(target,'.openai/hosting.json'),JSON.stringify(manifest,null,2)+'\n');
+fs.cpSync(path.join(root,'drizzle'),path.join(target,'.openai/drizzle'),{recursive:true});
 console.log('Worker prepared: dist/server/index.js');

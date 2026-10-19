@@ -15,7 +15,7 @@ const newsState={data:null,busy:false,visible:6,selected:null};
 const candleFeed=createCandleFeed({fetcher:(url,options)=>fetch(url,{...options,signal:AbortSignal.timeout(12000)})});
 const newsTopics={ethereum:'Ethereum & crypto',macro:'Macro',network:'Network upgrades',etf:'ETFs',regulation:'Regulation',security:'Security'};
 try{legacyPaused=localStorage.getItem('etherwatch-armed')==='false'&&!localStorage.getItem('etherwatch-migrated');}catch{}
-const state = {price:null,candles:[],days:90,armed:true,events:[],decisions:[],lastSuccess:0,lastCandles:0,dailyError:null,busy:false,chartData:[],stats:null,lastStats:0,statsError:null,aggregateVolume:null,volumeError:null,volumeBusy:false,lastVolumeAttempt:0,serverReady:false,canManage:false,canCheck:false,seen:new Set(),bootstrapped:false,background:null,lastCheck:0};
+const state = {price:null,candles:[],days:90,armed:true,events:[],decisions:[],lastSuccess:0,lastTicker:0,tickerError:null,lastCandles:0,dailyError:null,busy:false,chartData:[],stats:null,lastStats:0,statsError:null,aggregateVolume:null,volumeError:null,volumeBusy:false,lastVolumeAttempt:0,serverReady:false,canManage:false,canCheck:false,seen:new Set(),bootstrapped:false,background:null,lastCheck:0};
 const usd = n => Number.isFinite(n) ? n.toLocaleString('en-US',{style:'currency',currency:'USD',minimumFractionDigits:2,maximumFractionDigits:2}) : '—';
 const short = n => Number.isFinite(n) ? '$'+Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:2}).format(n) : '—';
 const escapeHTML = s => String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -136,33 +136,33 @@ function readStats(stats){
   return {open,volume};
 }
 function renderStats(){
-  const stale=Boolean(state.statsError)||!state.lastStats||Date.now()-state.lastStats>=45000;
-  if(!state.stats){$('change').textContent='24h stats unavailable';$('change').className='muted';return;}
+  const now=Date.now(),stale=Boolean(state.statsError||state.tickerError)||!state.lastStats||!state.lastSuccess||!state.lastTicker||now-state.lastStats>=45000||now-state.lastSuccess>=45000||now-state.lastTicker>=45000;
+  if(!state.stats||!state.price){$('change').textContent='24h change unavailable';$('change').className='muted';return;}
   if(state.price){const change=(state.price/state.stats.open-1)*100;$('change').textContent=(change>=0?'↗ +':'↘ ')+change.toFixed(2)+'%'+(stale?' · stale':'');$('change').className=stale?'muted':change>=0?'positive':'negative';}
-  $('change').title=(state.statsError?state.statsError+' · ':'')+'Stats fetched '+new Date(state.lastStats).toLocaleTimeString();
+  $('change').title=[state.tickerError,state.statsError,'Price updated '+new Date(state.lastTicker).toLocaleTimeString(),'Stats fetched '+new Date(state.lastStats).toLocaleTimeString()].filter(Boolean).join(' · ');
 }
 function renderVolume(){
-  const data=state.aggregateVolume,time=Date.parse(data?.fetchedAt),age=Date.now()-time;
-  const available=data&&Number.isFinite(time)&&age>=0&&age<3600000;
-  const stale=Boolean(state.volumeError)||data?.stale||age>=300000;
+  const data=state.aggregateVolume,now=Date.now(),time=Date.parse(data?.fetchedAt),updated=Date.parse(data?.sourceUpdatedAt),age=now-time,sourceAge=now-updated;
+  const available=data&&Number.isFinite(time)&&Number.isFinite(updated)&&age>=-60000&&sourceAge>=-60000&&age<3600000&&sourceAge<3600000;
+  const stale=Boolean(state.volumeError)||data?.stale||age>=300000||sourceAge>=300000;
   $('volume').textContent=available?short(data.volumeUsd):'—';
-  $('volume-note').textContent='Aggregate ETH · USD'+(!available?' · unavailable':stale?' · stale':'');
-  $('volume-freshness').textContent=available?'Fetched '+new Date(time).toLocaleTimeString():'Awaiting published statistic';
-  $('volume-source').textContent=data?.source||'Volume source';
-  if(data?.sourceUrl)$('volume-source').href=data.sourceUrl;
-  $('volume-note').title=(state.volumeError?state.volumeError+' · ':'')+'Aggregate Ethereum 24h trading volume in USD.'+(data?.sourceUpdatedAt?' Source updated '+new Date(data.sourceUpdatedAt).toLocaleString():' Source update time is not supplied.');
+  $('volume-note').textContent='ETH spot volume · rolling 24h · USD'+(!available?' · unavailable':stale?' · stale':'');
+  $('volume-updated').textContent=available?'Provider updated '+new Date(updated).toLocaleTimeString():'Provider update unavailable';
+  $('volume-freshness').textContent=available?'Fetched '+new Date(time).toLocaleTimeString():'Awaiting CoinMarketCap';
+  $('volume-source').textContent='CoinMarketCap';
+  $('volume-source').href='https://coinmarketcap.com/currencies/ethereum/';
+  $('volume-note').title=(state.volumeError?state.volumeError+' · ':'')+'Aggregate Ethereum spot trading volume over the rolling last 24 hours, in USD.';
 }
 async function refreshVolume(force=false){
   if(state.volumeBusy||!force&&state.lastVolumeAttempt&&Date.now()-state.lastVolumeAttempt<(state.volumeError?60000:300000))return;
   state.volumeBusy=true;state.lastVolumeAttempt=Date.now();
   try{
-    const data=await api('volume'),time=Date.parse(data?.fetchedAt);
-    const sources={TradingView:'https://www.tradingview.com/symbols/ETHUSD/?exchange=BITSTAMP',CoinGecko:'https://www.coingecko.com/en/coins/ethereum',CoinPaprika:'https://coinpaprika.com/coin/eth-ethereum/'};
-    if(data.asset!=='ETH'||data.currency!=='USD'||data.scope!=='aggregate'||(!Object.hasOwn(sources,data.source)||data.sourceUrl!==sources[data.source])||typeof data.volumeUsd!=='number'||!Number.isFinite(data.volumeUsd)||data.volumeUsd<=0||data.volumeUsd>Number.MAX_SAFE_INTEGER||!Number.isFinite(time)||time>Date.now()||Date.now()-time>=3600000)throw new Error('Invalid aggregate volume');
+    const data=await api('volume'),now=Date.now(),time=Date.parse(data?.fetchedAt),updated=Date.parse(data?.sourceUpdatedAt);
+    if(data?.asset!=='ETH'||data.currency!=='USD'||data.scope!=='aggregate'||data.sourceId!=='coinmarketcap'||data.source!=='CoinMarketCap'||data.sourceUrl!=='https://coinmarketcap.com/currencies/ethereum/'||typeof data.volumeUsd!=='number'||!Number.isFinite(data.volumeUsd)||data.volumeUsd<=0||data.volumeUsd>Number.MAX_SAFE_INTEGER||typeof data.fetchedAt!=='string'||typeof data.sourceUpdatedAt!=='string'||typeof data.stale!=='boolean'||!Number.isFinite(time)||!Number.isFinite(updated)||time>now+60000||updated>now+60000||now-time>=3600000||now-updated>=3600000)throw new Error('Invalid aggregate volume');
     state.aggregateVolume=data;state.volumeError=data.stale?data.error||'Source refresh unavailable':null;
   }catch(error){state.volumeError=error.message;}finally{state.volumeBusy=false;renderVolume();}
 }
-function updatePrice(ticker){const {price,time}=acceptTicker(ticker,Date.now());state.price=price;state.lastSuccess=Date.now();$('price').textContent=usd(price);$('connection').textContent='● Live · 15s updates';$('connection').style.color='var(--green)';$('updated').textContent='Updated '+new Date(time).toLocaleTimeString()+' · Coinbase';renderStats();renderPosition(price);renderLevels();draw();}
+function updatePrice(ticker){const {price,time}=acceptTicker(ticker,Date.now());state.price=price;state.lastSuccess=Date.now();state.lastTicker=time;state.tickerError=null;$('price').textContent=usd(price);$('connection').textContent='● Live · 15s updates';$('connection').style.color='var(--green)';$('connection').title='';$('updated').textContent='Updated '+new Date(time).toLocaleTimeString()+' · Coinbase';renderStats();renderPosition(price);renderLevels();draw();}
 async function refresh(){
   if(state.busy)return;state.busy=true;$('refresh').disabled=true;
   try{
@@ -180,7 +180,7 @@ async function refresh(){
     }
   }catch(error){chartError();}finally{renderStats();renderDailyFreshness();state.busy=false;$('refresh').disabled=false;}
 }
-function feedError(message){$('connection').textContent=state.lastSuccess?'● Stale · reconnecting':'● Feed unavailable';$('connection').style.color='var(--red)';$('connection').title=message;$('updated').textContent=state.lastSuccess?'Last successful update '+new Date(state.lastSuccess).toLocaleTimeString():'Unable to reach Coinbase · retrying every 15s';}
+function feedError(message){state.tickerError=message;$('connection').textContent=state.lastSuccess?'● Stale · reconnecting':'● Feed unavailable';$('connection').style.color='var(--red)';$('connection').title=message;$('updated').textContent=state.lastSuccess?'Last successful update '+new Date(state.lastSuccess).toLocaleTimeString():'Unable to reach Coinbase · retrying every 15s';}
 function chartError(){if(chartPrefs.timeframe===86400&&!state.candles.length){$('chart-empty').style.display='flex';$('chart-empty').innerHTML='Daily chart unavailable<small>The data feed may be blocked or temporarily unavailable.</small>';}else{$('updated').textContent+=' · Daily indicators stale';}}
 function volumeProfile(candles,bins=30){if(!candles.length)return null;const min=Math.min(...candles.map(c=>c.low)),max=Math.max(...candles.map(c=>c.high)),step=(max-min||1)/bins,volumes=Array(bins).fill(0);for(const c of candles){if(c.high===c.low){volumes[Math.min(bins-1,Math.floor((c.close-min)/step))]+=c.volume;continue;}for(let i=0;i<bins;i++){const overlap=Math.max(0,Math.min(c.high,min+(i+1)*step)-Math.max(c.low,min+i*step));volumes[i]+=c.volume*overlap/(c.high-c.low);}}const peak=Math.max(...volumes);return {min,step,volumes,peak,poc:min+(volumes.indexOf(peak)+.5)*step};}
 function draw(){try{priceChart.setData(graphState.candles,{price:state.price,levels,granularity:chartPrefs.timeframe});}catch(error){$('chart-empty').style.display='flex';$('chart-empty').textContent='Chart data unavailable · '+error.message;}}

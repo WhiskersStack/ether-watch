@@ -1,5 +1,6 @@
 const DAY=86400000,MAX_AGE=DAY,FRESH_AGE=21600000;
-const hosts=new Set(['www.bls.gov','www.bea.gov','www.federalreserve.gov','blog.ethereum.org','ethereum.org']);
+const hosts=new Set(['www.bls.gov','www.bea.gov','www.federalreserve.gov','blog.ethereum.org','ethereum.org','fred.stlouisfed.org']);
+export function calendarSafeLink(event){try{const url=new URL(event.url);return url.protocol==='https:'&&!url.username&&!url.password&&hosts.has(url.hostname)?url.href:null;}catch{return null;}}
 export function formatCalendarWhen(event,zone='Asia/Jerusalem'){
   if(event.status==='unconfirmed'||!event.date)return 'Unconfirmed · no activation date';
   if(event.startAt&&Number.isFinite(Date.parse(event.startAt)))return new Intl.DateTimeFormat('en-GB',{timeZone:zone,dateStyle:'medium',timeStyle:'short'}).format(new Date(event.startAt))+' · '+zone;
@@ -25,13 +26,12 @@ export function mountCalendar(){
   try{if(localStorage.getItem('etherwatch-calendar-zone')==='UTC')state.zone='UTC';}catch{}
   $('calendar-zone').value=state.zone;
   const node=(tag,text,className)=>{const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(className)el.className=className;return el;};
-  const safeLink=event=>{try{const url=new URL(event.url);return url.protocol==='https:'&&!url.username&&!url.password&&hosts.has(url.hostname)?url.href:null;}catch{return null;}};
   function render(){
     if(!state.data)return;state.data=retainCalendar(state.data);
     const data=state.data,list=$('calendar-events'),roadmap=$('calendar-roadmap');list.replaceChildren();roadmap.replaceChildren();
     const sources=new Map(data.sources.map(source=>[source.id,source]));
     for(const [events,target] of [[data.events,list],[data.roadmap,roadmap]])for(const event of events){
-      const url=safeLink(event);if(!url)continue;
+      const url=calendarSafeLink(event);if(!url)continue;
       const card=node('article',undefined,'calendar-card'),heading=node('h3'),link=node('a',event.title);link.href=url;link.target='_blank';link.rel='noopener noreferrer';heading.append(link);
       const source=sources.get(event.sourceId),when=node('p',formatCalendarWhen(event,state.zone),'calendar-when'),countdown=node('p',calendarCountdown(event,source),'calendar-countdown');
       const verified=source?.fetchedAt?' · verified '+new Date(source.fetchedAt).toLocaleString():'';

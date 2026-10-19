@@ -8,7 +8,7 @@ Current operational state: the scheduled Codex automation is PAUSED and Site bac
 
 Site ID: `appgprj_6acfc8555d7c81918cdf33a9acf1fa6f`
 
-Origin: https://ether-watch-jen.aquarose3.chatgpt.site
+Origins: https://ether-watch-jen.aquarose3.chatgpt.site and https://etherwatch.app. The hidden-input background helper uses its fixed Sites origin.
 
 User selected Codex notifications and approved this Site's network checks and Worker/database addition. The dashboard is now public, so the former owner-private dispatch boundary is insufficient for writes. No external recipient is authorized.
 
@@ -36,6 +36,18 @@ Settings changes intentionally cancel pending signals for older settings. Do not
 ## Operational limits
 
 The configured interval is recorded in the Site background status after the heartbeat is created. A local Codex heartbeat requires an available Codex app, online awake machine, authorized Site access and a reachable data feed. Sampling may miss a breach that reverses between runs. No continuous monitoring or exactly-once external notification guarantee is made.
+
+Production owner/service provisioning and authorized check/acknowledgement flows remain unverified, as does actual device-notification delivery. A browser/fixture test or successful deployment does not establish those capabilities. Physical-device touch QA and GitHub synchronization are also outstanding. Keep monitoring disabled until the separate authorized activation and verification are complete.
+
+## Market-data operations
+
+The headline volume card uses CoinMarketCap, Ethereum ID `1027`, USD `volume_24h`, as a single provider for rolling aggregate spot volume. This release explicitly sets the nonsecret choice **`CMC_USE_PUBLIC_API=true`** for the official keyless `https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/quotes/latest?id=1027&convert=USD` endpoint. Local preview enables public mode explicitly. No key, account or paid subscription is required.
+
+**`CMC_API_KEY`** remains an optional future keyed upgrade. A securely configured key selects CoinMarketCap's keyed `/v3/cryptocurrency/quotes/latest` endpoint before public mode; do not access its value during routine checks. No manual secret-entry screen has been verified. Deploy a saved version after changing runtime configuration to apply its environment revision. Neither volume-provider mode nor provisioning authorizes monitor writes or monitoring activation.
+
+Both public domains use a separate shared D1 volume-cache table and refresh lock. Upstream attempts are limited to one per five minutes, including manual Refresh; failure imposes a 15-minute cooldown or longer `Retry-After`. A stale successful snapshot expires within one hour and keeps its original source-update and retrieval times. Do not replace a failed response with another provider or relabel retrieval time as provider-update time. Check `/api/volume` from the hosted Worker in public mode before declaring it operational.
+
+The CPI calendar preserves BLS retrieval fallbacks and may use the official St. Louis Fed/FRED calendar if BLS fails. FRED-backed dates are labeled with their provenance and the direct BLS failure. Only explicit dates/times are accepted; no inferred CPI schedule or calendar entry is an alert trigger. Hosted retrieval must be verified separately from local fixture tests.
 
 ## Deployment checks
 

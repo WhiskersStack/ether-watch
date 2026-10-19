@@ -15,8 +15,10 @@ Ether Watch is a responsive ETH/USD dashboard that combines live market data, in
 ### Live Ethereum overview
 
 - Displays the Coinbase Exchange **ETH-USD** spot ticker and 24-hour change.
-- Shows aggregate Ethereum **24-hour trading volume in USD**, refreshed every five minutes, using TradingView’s aggregate feed with CoinGecko and CoinPaprika fallbacks. The active source and retrieval time are shown. Providers track different markets, so values can differ. Source update time is included when supplied. If retrieval fails, the last value is marked stale and expires after one hour.
+- Shows **Ethereum spot trading volume across tracked exchanges, rolling 24 hours, in USD**, using CoinMarketCap as the single provider. The provider-update time and retrieval time are shown separately. The value is not expected to match TradingView exactly and is not calculated from Coinbase's pair volume.
+- Refreshes aggregate volume at most once every five minutes across both public domains, using a shared D1 cache and refresh lock. A failed upstream attempt starts a 15-minute cooldown, or longer when required by `Retry-After`; manual Refresh respects this limit. The last successful value is visibly stale during failure and expires within one hour, retaining its original timestamps.
 - Refreshes the ticker and overview in the browser, with distinct timestamps for chart and daily-indicator data.
+- Marks the 24-hour percentage change stale if either the current ticker or opening-price stats fail or become 45 seconds old. Both inputs must recover before the warning clears.
 - Shows the current price relative to editable support and resistance levels.
 - Preserves the last successful data during a feed interruption while clearly marking stale or unavailable values. It does **not** substitute simulated prices.
 
@@ -56,7 +58,7 @@ Saved alert rules and monitoring state live in **D1**. Chart appearance preferen
 - Reads relevant headlines from the **Ethereum Foundation**, **CoinDesk**, **Decrypt**, and the **Federal Reserve**.
 - Filters by source, topic, or headline search; links to the original publisher rather than reproducing full articles.
 - Presents publication times, source health, and clearly identified cached results during temporary feed failures.
-- Displays upcoming macroeconomic and Ethereum events from official **BLS**, **BEA**, **Federal Reserve**, and **Ethereum** sources.
+- Displays upcoming macroeconomic and Ethereum events from official **BLS**, **BEA**, **Federal Reserve**, and **Ethereum** sources. When direct BLS retrieval fails, CPI scheduling can use the official **St. Louis Fed/FRED** calendar, with FRED provenance and a BLS failure warning. Only explicitly published release dates and times are used; missing CPI dates are never inferred.
 - Supports **UTC** and **Asia/Jerusalem** calendar display, with unconfirmed or undated events labeled accordingly.
 
 News categorization and chart markers provide context; they do **not** establish that a headline caused a price movement.
@@ -66,9 +68,9 @@ News categorization and chart markers provide context; they do **not** establish
 | Layer | Implementation |
 | --- | --- |
 | Frontend | HTML5, CSS3, vanilla JavaScript (ES modules), Canvas |
-| Market data | Coinbase Exchange REST endpoints; TradingView / CoinGecko / CoinPaprika aggregate ETH volume |
+| Market data | Coinbase Exchange REST endpoints; CoinMarketCap v3 aggregate ETH spot volume |
 | Backend | Dependency-free JavaScript Sites Worker |
-| Persistence | Managed D1 database, single monitor record with optimistic updates |
+| Persistence | Managed D1 database, monitor record with optimistic updates and a separate shared volume-cache table |
 | News / calendar | RSS/Atom feeds and official publisher or agency pages |
 | Build and tests | Node.js built-ins and Node's test runner |
 
@@ -93,7 +95,15 @@ There is **no npm dependency installation** or frontend framework required.
 
 3. Open **http://127.0.0.1:4174**.
 
-The local preview listens only on loopback, uses a **temporary in-memory SQLite database**, and supplies a **development-only test identity**. Settings and history reset when the process exits. It is not a production authentication system or a public deployment target.
+The local preview listens only on loopback, uses a **temporary in-memory SQLite database**, supplies a **development-only test identity**, and explicitly enables the CoinMarketCap public API mode described below. Settings and history reset when the process exits. It is not a production authentication system or a public deployment target.
+
+### Configure aggregate volume
+
+This release explicitly enables the official keyless API with the nonsecret runtime setting **`CMC_USE_PUBLIC_API=true`**. It requires no CoinMarketCap key, account or paid subscription. The Worker requests `https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/quotes/latest?id=1027&convert=USD`, then validates the Ethereum identity, positive USD `volume_24h`, and provider timestamp. CoinMarketCap remains the single provider; no alternate provider is used during failure.
+
+**`CMC_API_KEY`** is an optional future upgrade to CoinMarketCap's keyed `/v3/cryptocurrency/quotes/latest` endpoint with the same Ethereum ID `1027` and USD conversion. A configured key selects keyed mode before public mode. Any future key must be provisioned through a supported secure Sites runtime-configuration path; no manual secret-entry screen has been verified. Do not paste it into chat or put it in source, browser assets, terminal arguments, logs, documentation or Git. No key setup is required now. Deploy a saved version after changing runtime configuration to apply its environment revision.
+
+If the selected mode cannot supply a verified response, the card retains a visibly stale successful snapshot only while it is valid, then shows unavailable. Verify public-mode retrieval from the hosted Worker before declaring the source operational.
 
 ### Build the deployment bundle
 
@@ -107,10 +117,10 @@ This embeds the editable frontend sources and Worker modules into `dist/server/i
 
 ```bash
 node check.cjs
-node --test chart.test.mjs news.test.mjs market-data.test.mjs calendar.test.mjs calendar-ui.test.mjs rules.test.mjs worker.test.mjs ui-state.test.cjs
+node --test chart.test.mjs news.test.mjs market-data.test.mjs calendar.test.mjs calendar-ui.test.mjs rules.test.mjs worker.test.mjs ui-state.test.cjs data-accuracy.test.cjs background-helper.test.cjs volume.test.mjs
 ```
 
-Tests cover chart calculations, market-data validation, news/calendar parsing, alert evaluation, Worker endpoints, and UI state. They can use controlled fixtures rather than modifying production settings.
+Tests cover chart calculations, market-data validation and freshness, volume parsing/cache behavior, news/calendar parsing and provenance, alert evaluation, Worker endpoints, background-helper restrictions, and UI state. They use controlled fixtures rather than modifying production settings. The version 13 baseline passed 207 tests; this is a historical result, not the test count for a later release.
 
 ## Repository structure
 
@@ -128,9 +138,10 @@ worker/
   index.js             Authenticated application routes and D1 state
   news.js              News ingestion, validation, and caching
   calendar.js          Official-event ingestion and validation
-  volume.js            Published aggregate ETH volume retrieval and caching
+  volume.js            CoinMarketCap aggregate ETH volume and shared caching
 
 drizzle/0000_monitor.sql  Database schema
+drizzle/                 Additive migrations, including separate volume cache
 .openai/hosting.json    Managed hosting manifest
 build-worker.cjs        Dependency-free production bundle builder
 local-worker-preview.mjs Local Worker + in-memory database preview
@@ -148,12 +159,13 @@ UPGRADE-INSTRUCTIONS.md Upgrade and release history
 - Polling may miss a brief crossing that occurs between samples.
 - An event marked as acknowledged/reported is not proof that a device notification was delivered or read.
 - Market, news, and calendar sources may fail or temporarily become unavailable; the UI surfaces those conditions.
+- Production owner/service provisioning, authorized monitor flows, and actual device-notification delivery remain unverified. Physical-device touch testing is also outstanding; desktop/mobile browser checks do not replace it.
 
 See [MONITOR-RUNBOOK.md](MONITOR-RUNBOOK.md) for operational details.
 
 ## Project direction
 
-Ether Watch remains a work in progress. Current priorities are refining the mobile experience, strengthening feed and alert reliability, and improving the clarity of chart and event interactions—while preserving private access and explicit control over monitoring.
+Ether Watch remains a work in progress. The current accuracy release builds on the public version 13 baseline. Verify CoinMarketCap and CPI retrieval from the hosted Worker before declaring those sources operational. Owner/service verification, real notification delivery, physical-device touch QA, and GitHub synchronization remain later work. Keep monitor writes restricted and monitoring activation explicit.
 
 ---
 

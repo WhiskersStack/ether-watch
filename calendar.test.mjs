@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 const calendarCode=readFileSync(new URL('./worker/calendar.js',import.meta.url),'utf8');
-const {CALENDAR_SOURCES,calendarText,calendarSafeURL,calendarNYTime,calendarUpcoming,calendarParseBlsHTML,calendarParseBlsICS,calendarParseBlsAnnualHTML,calendarParseBeaHTML,calendarParseFomcHTML,calendarMainnetLinks,calendarParseMainnetHTML,calendarParseRoadmapHTML,fetchCalendar}=await import('data:text/javascript;base64,'+Buffer.from(calendarCode).toString('base64'));
+const {CALENDAR_SOURCES,calendarText,calendarSafeURL,calendarNYTime,calendarChicagoTime,calendarUpcoming,calendarParseBlsHTML,calendarParseBlsICS,calendarParseBlsAnnualHTML,calendarParseFredHTML,calendarParseBeaHTML,calendarParseFomcHTML,calendarMainnetLinks,calendarParseMainnetHTML,calendarParseRoadmapHTML,fetchCalendar}=await import('data:text/javascript;base64,'+Buffer.from(calendarCode).toString('base64'));
 const now=Date.parse('2026-10-17T12:00:00Z'),request=()=>new Request('https://ether-watch.example/api/calendar');
 const blsRow=(period,date,time)=>'<tr><td>'+period+'</td><td>'+date+'</td><td>'+time+'</td></tr>';
 const blsHTML=(rows=[blsRow('September 2026','Oct. 29, 2026','08:30 AM'),blsRow('October 2026','Nov. 10, 2026','08:30 AM'),blsRow('November 2026','Dec. 10, 2026','08:30 AM')])=>'<h2>Schedule of Releases for the Consumer Price Index</h2><table><tr><th>Reference Month</th><th>Release Date</th><th>Release Time</th></tr>'+rows.join('')+'</table>';
@@ -136,7 +136,7 @@ test('BLS HTML failure falls back to official iCalendar with an explicit warning
 });
 test('changed formats and oversized bodies surface source errors without suppressing other sources',async()=>{
   const overrides={[CALENDAR_SOURCES[0].url]:'unknown','https://www.bls.gov/schedule/news_release/bls.ics':'unknown','https://www.bls.gov/schedule/2026/home.htm':'unknown',[CALENDAR_SOURCES[1].url]:()=>new Response('large',{headers:{'Content-Length':String(3*1024*1024)}})};
-  const response=await fetchCalendar(request(),{fetch:fixtureFetch(overrides),cache:null,now}),body=await response.json();assert.equal(response.status,200);assert.equal(body.partial,true);assert.equal(body.events.some(event=>['cpi','pce'].includes(event.kind)),false);assert.equal(body.sources[0].status,'error');assert.match(body.sources[0].error,/unrecognized/);assert.equal(body.sources[1].status,'error');assert.match(body.sources[1].error,/too large/);assert.equal(body.sources[2].status,'ok');
+  const response=await fetchCalendar(request(),{fetch:fixtureFetch(overrides),cache:null,now}),body=await response.json();assert.equal(response.status,200);assert.equal(body.partial,true);assert.equal(body.events.some(event=>['cpi','pce'].includes(event.kind)),false);assert.equal(body.sources[0].status,'error');assert.match(body.sources[0].error,/CPI calendars unavailable/);assert.equal(body.sources[1].status,'error');assert.match(body.sources[1].error,/too large/);assert.equal(body.sources[2].status,'ok');
 });
 test('verified roadmap survives a protocol-source failure with an explicit partial warning',async()=>{
   const body=await (await fetchCalendar(request(),{fetch:fixtureFetch({[CALENDAR_SOURCES[3].url]:new Error('fixture failure')}),cache:null,now})).json(),source=body.sources.find(source=>source.id==='ethereum');assert.equal(source.status,'ok');assert.match(source.warning,/Mainnet announcements are unavailable/);assert.equal(body.partial,true);assert.equal(body.events.some(event=>event.kind==='ethereum-upgrade'),false);assert.equal(body.roadmap.length,2);
@@ -157,4 +157,64 @@ test('BEA next-year schedule is consulted when the 30-day window crosses New Yea
 test('BEA retains verified current-year events when the next-year schedule is unavailable',async()=>{
   const clock=Date.parse('2026-12-20T12:00:00Z'),overrides={[CALENDAR_SOURCES[1].url]:beaHTML(2026,[beaRow('December 23','8:30 AM')]),'https://www.bea.gov/news/schedule/next-year':new Error('Not yet available')};
   const body=await (await fetchCalendar(request(),{fetch:fixtureFetch(overrides),cache:null,now:clock})).json(),source=body.sources.find(source=>source.id==='bea');assert.equal(source.status,'ok');assert.match(source.warning,/schedule year is unavailable/);assert.equal(body.partial,true);assert.equal(body.events.find(event=>event.kind==='pce').date,'2026-12-23');
+});
+
+// Date-heading row followed by a time/release row mirrors the official FRED calendar table.
+const fredURL=year=>'https://fred.stlouisfed.org/releases/calendar?rid=10&y='+year;
+const fredRow=(date,time='7:30 am',rid=10,title='Consumer Price Index')=>'<tr class="odd"><td colspan="2"><span>'+date+'</span></td></tr><tr><td>'+time+'</td><td><a href="/release?rid='+rid+'">'+title+'</a></td></tr>';
+const fredHTML=(year=2026,rows=[fredRow('Wednesday October 14, 2026'),fredRow('Tuesday November 10, 2026')],zone='All times are US Central Time.')=>'<title>'+year+' Economic Release Calendar - Consumer Price Index | FRED | St. Louis Fed</title><h1>Release Calendar</h1><table><thead><tr><th></th><th>Sort By: <a>Date</a> | <a>Name</a></th></tr></thead><tbody>'+rows.join('')+'</tbody></table><p>'+zone+'</p>';
+const blsUnavailable=(years=[2026])=>Object.fromEntries([CALENDAR_SOURCES[0].url,'https://www.bls.gov/schedule/news_release/bls.ics',...years.map(year=>'https://www.bls.gov/schedule/'+year+'/home.htm')].map(url=>[url,()=>new Response('Forbidden',{status:403})]));
+test('Chicago release times preserve Central DST and reject missing or repeated local hours',()=>{
+  assert.equal(calendarChicagoTime('2026-10-14',{hour:7,minute:30,second:0}),'2026-10-14T12:30:00.000Z');
+  assert.equal(calendarChicagoTime('2026-11-10',{hour:7,minute:30,second:0}),'2026-11-10T13:30:00.000Z');
+  assert.equal(calendarChicagoTime('2026-03-08',{hour:2,minute:30,second:0}),null);
+  assert.equal(calendarChicagoTime('2026-11-01',{hour:1,minute:30,second:0}),null);
+});
+test('FRED CPI parser uses explicit release date/time and actual provenance',()=>{
+  const events=calendarParseFredHTML(fredHTML(),2026);assert.equal(events.length,2);assert.equal(events[0].startAt,'2026-10-14T12:30:00.000Z');assert.equal(events[1].startAt,'2026-11-10T13:30:00.000Z');assert.equal(events[1].timeZone,'America/Chicago');assert.equal(events[1].sourceId,'bls');assert.equal(events[1].source,'St. Louis Fed / FRED (BLS CPI schedule)');assert.equal(events[1].url,fredURL(2026));
+  assert.equal(calendarUpcoming(events,now).length,1);
+  const mixed=calendarParseFredHTML(fredHTML(2026,[fredRow('Tuesday November 10, 2026','7:30 am',10),fredRow('Wednesday November 11, 2026','7:30 am',50,'Producer Price Index')]),2026);assert.equal(mixed.length,1);
+});
+test('FRED CPI parser rejects wrong release identity, timezone, year and malformed dates/times',()=>{
+  for(const html of [
+    fredHTML(2026,undefined,''),fredHTML(2026,undefined,'All times are US Eastern Time.'),
+    fredHTML().replace('Consumer Price Index | FRED','Producer Price Index | FRED'),
+    fredHTML(2027),fredHTML(2026,[fredRow('Tuesday November 10, 2026','7:30 am',313,'Sticky Price CPI')]),
+    fredHTML(2026,[fredRow('Tuesday November 10, 2026','7:30 am',313)]),
+    fredHTML(2026,[fredRow('Tuesday November 10, 2026','To be announced')]),
+    fredHTML(2026,[fredRow('Tuesday November 10, 2026','25:30 am')]),
+    fredHTML(2026,[fredRow('Tuesday November 10, 2026','7:30')]),
+    fredHTML(2026,[fredRow('Monday November 10, 2026')]),
+    fredHTML(2026,[fredRow('Tuesday November 31, 2026')]),
+    fredHTML(2026,[fredRow('November 10')]),
+    fredHTML(2026,[fredRow('Tuesday November 10, 2026')]).replace('/release?rid=10','https://evil.example/release?rid=10'),
+    fredHTML(2026,[fredRow('Tuesday November 10, 2026')]).replace('<tr class="odd"><td colspan="2"><span>Tuesday November 10, 2026</span></td></tr>','')
+  ])assert.throws(()=>calendarParseFredHTML(html,2026),/unrecognized/);
+});
+test('FRED CPI parser deduplicates identical rows but rejects conflicting exact times',()=>{
+  const row=fredRow('Tuesday November 10, 2026');assert.equal(calendarParseFredHTML(fredHTML(2026,[row,row]),2026).length,1);
+  assert.throws(()=>calendarParseFredHTML(fredHTML(2026,[row,fredRow('Tuesday November 10, 2026','8:30 am')]),2026),/conflicting/);
+});
+test('BLS failure falls back to FRED with clear event and source-health provenance',async()=>{
+  const calls=[],overrides={...blsUnavailable(),[fredURL(2026)]:fredHTML()},body=await(await fetchCalendar(request(),{fetch:fixtureFetch(overrides,calls),cache:null,now})).json(),source=body.sources.find(source=>source.id==='bls'),cpi=body.events.find(event=>event.kind==='cpi');
+  assert.equal(source.status,'ok');assert.equal(source.name,'St. Louis Fed / FRED (BLS CPI schedule)');assert.equal(source.url,fredURL(2026));assert.match(source.warning,/Direct BLS schedules unavailable/);assert.equal(cpi.source,source.name);assert.equal(cpi.url,source.url);assert.equal(cpi.startAt,'2026-11-10T13:30:00.000Z');assert.equal(body.partial,true);assert.equal(body.sources[1].status,'ok');assert.ok(calls.length<=16);
+  assert.ok(calls.findIndex(call=>call.url===fredURL(2026))>calls.findIndex(call=>call.url==='https://www.bls.gov/schedule/2026/home.htm'));
+});
+test('FRED fallback checks both explicit years across New Year and retains partial-year provenance',async()=>{
+  const clock=Date.parse('2026-12-25T12:00:00Z'),calls=[],overrides={...blsUnavailable([2026,2027]),[fredURL(2026)]:fredHTML(2026,[fredRow('Thursday December 10, 2026')]),[fredURL(2027)]:fredHTML(2027,[fredRow('Wednesday January 13, 2027')]),'https://www.bea.gov/news/schedule/next-year':beaHTML(2027,[beaRow('January 29','8:30 AM')])};
+  const body=await(await fetchCalendar(request(),{fetch:fixtureFetch(overrides,calls),cache:null,now:clock})).json();assert.equal(body.events.find(event=>event.kind==='cpi').startAt,'2027-01-13T13:30:00.000Z');assert.ok(calls.some(call=>call.url===fredURL(2026)));assert.ok(calls.some(call=>call.url===fredURL(2027)));assert.ok(calls.length<=16);
+  overrides[fredURL(2026)]=()=>new Response('Unavailable',{status:503});const partial=await(await fetchCalendar(request(),{fetch:fixtureFetch(overrides),cache:null,now:clock})).json(),source=partial.sources[0];assert.equal(source.url,fredURL(2027));assert.match(source.warning,/One FRED schedule year is unavailable/);assert.equal(partial.events.find(event=>event.kind==='cpi').date,'2027-01-13');
+});
+test('FRED cached and stale schedules retain original source/time and direct BLS recovery restores BLS provenance',async()=>{
+  const cache=memoryCache(),overrides={...blsUnavailable(),[fredURL(2026)]:fredHTML()},first=await(await fetchCalendar(request(),{fetch:fixtureFetch(overrides),cache,now})).json();assert.ok([...cache.entries.keys()].every(key=>key.includes('/v2/')));
+  const fresh=await(await fetchCalendar(request(),{fetch:noNetwork,cache,now:now+3600000})).json();assert.equal(fresh.sources[0].name,first.sources[0].name);assert.equal(fresh.sources[0].url,fredURL(2026));assert.equal(fresh.sources[0].fetchedAt,first.sources[0].fetchedAt);
+  const stale=await(await fetchCalendar(request(),{fetch:noNetwork,cache,now:now+7*3600000})).json();assert.equal(stale.sources[0].status,'stale');assert.equal(stale.sources[0].url,fredURL(2026));assert.equal(stale.sources[0].fetchedAt,first.sources[0].fetchedAt);assert.match(stale.sources[0].warning,/Direct BLS/);assert.equal(stale.events.find(event=>event.kind==='cpi').source,first.sources[0].name);
+  const expired=await(await fetchCalendar(request(),{fetch:noNetwork,cache,now:now+24*3600000+1})).json();assert.equal(expired.events.length,0);assert.equal(expired.sources[0].status,'error');
+  const recovered=await(await fetchCalendar(request(),{fetch:fixtureFetch(),cache,now:now+8*3600000})).json();assert.equal(recovered.sources[0].name,'Bureau of Labor Statistics');assert.equal(recovered.sources[0].url,CALENDAR_SOURCES[0].url);assert.equal(recovered.sources[0].warning,null);
+});
+test('unavailable or unrecognized FRED never invents CPI dates and redirects remain allowlisted',async()=>{
+  for(const fred of [()=>new Response('Forbidden',{status:403}),fredHTML(2026,[]),fredHTML(2026,undefined,''),()=>new Response(null,{status:302,headers:{Location:'https://evil.example/cpi'}})]){
+    const calls=[],body=await(await fetchCalendar(request(),{fetch:fixtureFetch({...blsUnavailable(),[fredURL(2026)]:fred},calls),cache:null,now})).json();assert.equal(body.sources[0].status,'error');assert.match(body.sources[0].error,/CPI calendars unavailable/);assert.equal(body.events.some(event=>event.kind==='cpi'),false);assert.equal(body.sources[1].status,'ok');assert.equal(body.partial,true);assert.equal(calls.some(call=>call.url.includes('evil.example')),false);assert.ok(calls.length<=16);
+  }
+  const source=CALENDAR_SOURCES[0];assert.equal(calendarSafeURL(fredURL(2026),source),null);
 });

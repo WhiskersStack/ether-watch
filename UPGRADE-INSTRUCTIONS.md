@@ -1,33 +1,31 @@
 # Ether Watch upgrade instructions
 
-## Current roadmap · 2026-10-17
+## Current release guidance · 2026-10-19
+
+The pre-accuracy-release baseline was **public version 13**. The dependency-free Worker/D1 backend and chart, news, calendar and alert-control upgrades are already deployed. Historical private-access, stage-gating and unpublished-migration instructions below describe earlier milestones and do not override this current guidance.
+
+The accuracy release uses one headline-volume provider: CoinMarketCap, Ethereum ID `1027`, USD `volume_24h`. The card means rolling 24-hour aggregate Ethereum spot volume across tracked exchanges, not Coinbase pair volume; exact agreement with TradingView is not required. Set the nonsecret runtime choice `CMC_USE_PUBLIC_API=true` to use the official keyless `https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/quotes/latest?id=1027&convert=USD` endpoint. Local preview enables public mode explicitly. No key, account or paid subscription is required for this release.
+
+`CMC_API_KEY` is only an optional future keyed upgrade; when configured securely, it selects `/v3/cryptocurrency/quotes/latest` before public mode. No manual secret-entry screen has been verified. Never read or write a future key's value in source, logs, browser assets, command arguments or release instructions. Deploy a saved version after a runtime configuration change to apply the new environment revision.
+
+Apply the additive volume-cache migration to the existing D1 binding without changing monitor records. Both public domains share a five-minute upstream attempt limit and refresh lock, including manual Refresh. A failed attempt uses a 15-minute cooldown or longer `Retry-After`. Retain a visibly stale successful snapshot for at most one hour, preserving its provider-update and retrieval timestamps. Do not switch volume providers during outages.
+
+Also mark 24-hour price change stale when either ticker or opening-price stats fail or exceed 45 seconds; clear only when both recover. Preserve BLS schedule fallbacks, then use explicitly published St. Louis Fed/FRED CPI dates/times if BLS fails. Label FRED provenance and the BLS failure, using `America/Chicago` for FRED and `America/New_York` for BLS. Missing events remain unavailable rather than inferred.
+
+Use the complete eleven-file test command in `README.md`, run calculation checks and the Worker build, and inspect desktop/mobile rendering, Refresh, links, console output and failure/recovery behavior. The version 13 baseline passed 207 tests. This accuracy release passed 226 automated tests, calculation checks, the Worker build and desktop/mobile fixture browser QA; hosted acceptance is checked separately after deployment. Verify CoinMarketCap and CPI from the hosted Worker before reporting them operational. Commit and publish the tested exact source through Sites, preserving the public audience. Record a new version number only after publication succeeds.
+
+The Codex automation must remain **PAUSED** and Site background checking **disabled**. Production owner/service provisioning, authorized monitor flows, actual device notification delivery and physical-device touch QA remain unverified. GitHub synchronization is deferred. Monitoring activation requires a separate explicit request.
+
+## Historical roadmap · 2026-10-17
+
+The following October 17 roadmap and October 14 brief are retained as release history. References to owner-private deployment, a prepared backend migration, blocked browser QA, and then-pending stages describe those dates; they are not current deployment instructions.
 
 The user authorized all six follow-up upgrades in four stages: status/news clarity; expanded chart/fit/indicator/touch controls; news markers/official calendar; selected-level/proximity/daily-volume alerts and evidence history. Use the existing dependency-free Worker/D1 architecture and free public sources. The README documents current behavior and test commands; earlier sections below record the original October 14 architecture brief.
 
-Stages 2-4 were published separately on 2026-10-17 as saved versions 5, 6, and 7; production is version 7. The user accepted publication with physical touch unverified. Desktop/mobile viewport checks do not establish physical touch behavior. Sole-owner access, the Codex automation PAUSED, and disabled Site background checking were verified after every release. Do not add another automation or enable schedule controls. Test notification behavior with in-memory fixtures, not live settings changes.
-
-### Verification update · 2026-10-17
-
-- The latest local candidate has desktop 1280x900 and mobile viewport 390x844 checks covering chart/modal/focus behavior, indicator panes and option persistence, literal/topic/source filtering and pagination, the news daily-chart fallback, calendar UTC/Asia-Jerusalem display, selected-level/proximity/volume option persistence, and local-only breach-history evidence. These checks do not establish physical touch behavior; the user accepted that limitation for publication on 2026-10-17.
-- Saved Stage 2 was also opened separately: its expanded chart rendered both indicator panes, closed with Escape and restored focus, and fit the 390px viewport. Saved Stage 3 rendered grouped publication markers; selecting a grouped headline closed the expanded chart and focused its accessible news card. Its calendar displayed official date-only and exact-time entries, plus undated roadmap cards, at desktop and mobile widths.
-- An archived Stage 3 check found key-level prices clipped on narrow screens. Current `dist/style.css` uses a single-column `#level-list` below 480px. After rebuilding, the 390px visual check confirmed all six prices and distances remain inside the panel. This fix remains local and is absent from deployed saved versions 5-7.
-- Refreshed source snapshots passed 65/65 Stage 2 tests, 103/103 Stage 3 tests, and 138/138 Stage 4 tests. Each stage passed `check.cjs`, application syntax checks, and the Worker rebuild. Their JavaScript matches the saved versions; their extra phone CSS fix remains local. Physical touch remains unverified under the accepted release exception.
-- Fresh authenticated live Site review showed Scheduled checks paused; the application maps this label to `!background.enabled`. The Codex automation file remains `PAUSED`. Sites metadata confirmed sole-owner access with no editors/groups/external visitors and zero cloud schedules. No live settings or schedules were changed.
-- Even after explicit approval for the official helper's hidden credential input, automatic approval review rejected the token in the internal `write_stdin` payload. Do not retry through disguised or indirect credential transport. No source push completed. The safe supported alternative was direct private deployment of the existing matching saved versions and archives. The additional phone CSS fix and current documentation remain local pending a permitted source-authentication path.
-- Final live checks confirmed chart expansion, news-to-chart selection, new alert controls/history, preserved revision 1 S1/R1 immediate settings, proximity/volume off, and no browser console warnings/errors. Calendar health showed BLS unavailable and BEA/Federal Reserve/Ethereum verified. No live alert settings or schedules were changed.
-
-### Deployment record · 2026-10-17
-
-| Stage | Saved version | Deployment | Result |
-| --- | --- | --- | --- |
-| 2 | 5 · `appgprj_6acfc8555d7c81918cdf33a9acf1fa6f~appgver_678d8804218c81918f76892a416c0d96` | `appgdep_6ad351b7f514819193790c7ba7e8a93f` | Succeeded |
-| 3 | 6 · `appgprj_6acfc8555d7c81918cdf33a9acf1fa6f~appgver_7a57b2e6e2048191b5c367e77493f51c` | `appgdep_6ad351ee992c81918a143ab09d5edc31` | Succeeded |
-| 4 | 7 · `appgprj_6acfc8555d7c81918cdf33a9acf1fa6f~appgver_d1241a52cde881919e0e73b7ee368981` | `appgdep_6ad3522abe94819190be1e714eb194a2` | Succeeded |
-
-Current production source: `21e2cbf78aa29b8a27abfbf98638eb5d902d81e3`. Rollback version 4 was freshly confirmed with its archive: `appgprj_6acfc8555d7c81918cdf33a9acf1fa6f~appgver_70c51238885c81919c4a6627b5c36098`. Preserve primary checkout changes; isolated Stage 2 copies were preparation only and must not overwrite the latest source.
+At that milestone, Stage 1 was deployed and later stages were saved candidates pending desktop/mobile visual QA. Browser security policy had blocked preview access, and the user retained that release gate. The Site was owner-private then. The Codex automation was PAUSED and Site background checking disabled; those monitoring states still must be preserved. Test notification behavior with in-memory fixtures, not live settings changes.
 
 Prepared: 2026-10-14 (Asia/Jerusalem)
-Status: Feature rollout published as versions 5-7 with verified paused monitoring and sole-owner access. Physical touch remains unverified under the accepted exception; the additional phone CSS fix remains unpublished because source authentication was blocked.
+Historical status: Verified brief. The user selected Codex notifications and explicitly approved the Sites server/database addition. Implementation and deployment verification were in progress at the time.
 
 ## Objective and scope
 
@@ -124,5 +122,5 @@ Follow the user's global AGENTS instructions: inspect before editing, keep chang
 - Independent review completed. Scope and acceptance coverage pass after clarifying strict flip boundaries, quote/candle validation, access preservation, and limiting the editor to the existing six levels.
 - Parent verification checked the live Site identity, owner role, allowed-user role, absence of editors/groups, and linked schedule inventory. No credential was printed or written to this file.
 - Confirmed `git diff --stat` was empty before this new instructions file was finalized. Application files were not edited for this preparation milestone.
-- Historical preparation record: the user chose Codex notifications and approved the dependency-free Sites Worker/D1 addition. Cadence and unattended-access verification were pending at that time. Any later resumption must verify the intended unattended path; the current publication request keeps monitoring paused.
-- The original document review did not execute the new features or send notifications. Current implementation verification and the accepted physical-touch limitation are recorded in the 2026-10-17 update above.
+- User chose Codex notifications and approved the dependency-free Sites Worker/D1 addition. The heartbeat's actual supported cadence and deployed unattended access still require verification.
+- Next validation is implementation testing against the acceptance checks above. This document review did not execute the new features or send notifications.
