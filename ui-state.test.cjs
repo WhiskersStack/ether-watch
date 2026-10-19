@@ -86,6 +86,30 @@ test('news filters overlap topics and treat search punctuation literally before 
 
 test('one expired source cannot clear newer news from another source',()=>{const now=Date.now(),ctx=vm.createContext({Date,Set});vm.runInContext(extract('function retainNewsSources(','async function refreshNews('),ctx);const data={fetchedAt:new Date(now-86400001).toISOString(),sources:[{id:'old',status:'stale',fetchedAt:new Date(now-86400001).toISOString()},{id:'fresh',status:'ok',fetchedAt:new Date(now-1000).toISOString()}],items:[{sourceId:'old'},{sourceId:'fresh'}]};const result=ctx.newsFallback(data,'offline',now);assert.equal(result.items.length,1);assert.equal(result.items[0].sourceId,'fresh');assert.equal(result.sources[1].fetchedAt,data.sources[1].fetchedAt);assert.equal(result.sources[0].status,'error');});
 
+test('fresh news survives bounded device clock differences and later renders',()=>{
+  const now=Date.parse('2026-10-19T05:30:00Z'),ctx=vm.createContext({Date,Set});vm.runInContext(extract('function retainNewsSources(','async function refreshNews('),ctx);
+  for(const skew of [500,60000]){
+    const fetchedAt=new Date(now+skew).toISOString(),data={fetchedAt,sources:[{id:'ethereum',status:'ok',fetchedAt}],items:[{id:'one',sourceId:'ethereum'}],partial:false,stale:false,error:null};
+    const retained=ctx.retainNewsSources(data,now);assert.equal(retained.items.length,1);assert.equal(retained.sources[0].status,'ok');assert.equal(retained.fetchedAt,fetchedAt);assert.equal(retained.partial,false);assert.equal(retained.error,null);
+    const later=ctx.retainNewsSources(retained,now+skew+1);assert.equal(later.items.length,1);assert.equal(later.sources[0].status,'ok');assert.equal(later.fetchedAt,fetchedAt);assert.equal(data.items.length,1);
+    const legacy=ctx.retainNewsSources({...data,sources:[{id:'ethereum',status:'ok'}]},now);assert.equal(legacy.items.length,1);assert.equal(legacy.fetchedAt,fetchedAt);
+  }
+});
+test('invalid verification times reject only their news source with an accurate explanation',()=>{
+  const now=Date.parse('2026-10-19T05:30:00Z'),ctx=vm.createContext({Date,Set});vm.runInContext(extract('function retainNewsSources(','async function refreshNews('),ctx);
+  for(const fetchedAt of [new Date(now+60001).toISOString(),'invalid']){
+    const data={fetchedAt:new Date(now-1000).toISOString(),sources:[{id:'bad',status:'ok',fetchedAt},{id:'good',status:'ok',fetchedAt:new Date(now-1000).toISOString()}],items:[{sourceId:'bad'},{sourceId:'good'}]},result=ctx.retainNewsSources(data,now);
+    assert.equal(result.items.length,1);assert.equal(result.items[0].sourceId,'good');assert.equal(result.sources[0].status,'error');assert.equal(result.sources[0].error,'Invalid source verification timestamp');assert.equal(result.sources[1].status,'ok');assert.equal(data.items.length,2);
+  }
+});
+test('news clock tolerance does not extend the 24-hour expiry or hide upstream failures',()=>{
+  const now=Date.parse('2026-10-19T05:30:00Z'),ctx=vm.createContext({Date,Set});vm.runInContext(extract('function retainNewsSources(','async function refreshNews('),ctx);
+  const fetchedAt=new Date(now+60000).toISOString(),data={fetchedAt,sources:[{id:'ethereum',status:'ok',fetchedAt},{id:'failed',status:'error',fetchedAt:null,error:'HTTP 403'}],items:[{sourceId:'ethereum'},{sourceId:'failed'}]};
+  const cached=ctx.newsFallback(data,'offline',now);assert.equal(cached.items.length,1);assert.equal(cached.sources[0].status,'stale');assert.equal(cached.fetchedAt,fetchedAt);assert.equal(cached.sources[1].error,'HTTP 403');
+  const boundary=ctx.retainNewsSources(data,now+60000+86400000);assert.equal(boundary.items.length,1);assert.equal(boundary.fetchedAt,fetchedAt);
+  const expired=ctx.retainNewsSources(data,now+60000+86400001);assert.equal(expired.items.length,0);assert.equal(expired.sources[0].error,'Cached source expired');assert.equal(expired.fetchedAt,null);
+});
+
 test('expanded chart closes before the selected story receives focus',async()=>{let closeHandler,closed=false,focused=false;const card={dataset:{newsId:'one'},focus(){assert.ok(closed,'Background story is inert until modal closes');focused=true;},scrollIntoView(){assert.ok(focused);}};const dialog={open:true,addEventListener(name,handler){assert.equal(name,'close');closeHandler=handler;},close(){this.open=false;Promise.resolve().then(()=>{closed=true;closeHandler();});}};const elements={'expanded-chart-dialog':dialog,'news-filter':{},'news-source':{},'news-search':{},'news-selection':{},'news-list':{children:[card]}};const ctx=vm.createContext({Date,Math,Promise,$:id=>elements[id],newsState:{data:{items:[{id:'one',title:'Fixture',publishedAt:new Date().toISOString()}]}},newsRender(){}});vm.runInContext(extract('async function selectNewsEvent(','function focusNews('),ctx);await ctx.selectNewsEvent({id:'one'});assert.ok(focused);});
 
 async function alertSettingsContext(overrides={}){

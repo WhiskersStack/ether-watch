@@ -245,9 +245,9 @@ function focusNews(item){
   if(result.focused){$('chart').focus();$('chart').scrollIntoView({block:'center'});}
 }
 function retainNewsSources(previous,now=Date.now()){
-  const fetched=Date.parse(previous?.fetchedAt),validTime=time=>Number.isFinite(time)&&time<=now&&now-time<=86400000;
+  const fetched=Date.parse(previous?.fetchedAt),validTime=time=>Number.isFinite(time)&&time<=now+60000&&now-time<=86400000;
   if(!previous?.sources?.length)return previous&&validTime(fetched)?previous:{items:[],sources:[],fetchedAt:null,stale:true,partial:true,error:'Cached news expired or unavailable'};
-  const times=[],sources=previous.sources.map(source=>{const time=source.fetchedAt===undefined?fetched:Date.parse(source.fetchedAt);if(validTime(time)&&source.status!=='error'){times.push(time);return {...source};}return {...source,status:'error',error:source.fetchedAt? 'Cached source expired':source.error||'Source unavailable'};});
+  const times=[],sources=previous.sources.map(source=>{const timestamp=source.fetchedAt===undefined?previous.fetchedAt:source.fetchedAt,time=Date.parse(timestamp);if(validTime(time)&&source.status!=='error'){times.push(time);return {...source};}const invalid=timestamp&&(!Number.isFinite(time)||time>now+60000);return {...source,status:'error',error:invalid?'Invalid source verification timestamp':timestamp&&now-time>86400000?'Cached source expired':source.error||'Source unavailable'};});
   const valid=new Set(sources.filter(source=>source.status!=='error').map(source=>source.id));
   return {...previous,sources,items:(previous.items||[]).filter(item=>item.sourceId?valid.has(item.sourceId):validTime(fetched)),fetchedAt:times.length?new Date(Math.min(...times)).toISOString():null,stale:sources.some(source=>source.status==='stale'),partial:previous.partial||sources.some(source=>source.status!=='ok'),error:times.length?previous.error:'News sources unavailable or expired'};
 }
