@@ -1,7 +1,34 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {formatCalendarWhen,calendarCountdown,retainCalendar,calendarSafeLink,calendarStatus} from './dist/calendar-ui.mjs';
+import {formatCalendarWhen,calendarCountdown,retainCalendar,calendarSafeLink,calendarStatus,CALENDAR_TIME_ZONES,calendarZonePreference,resolveCalendarZone} from './dist/calendar-ui.mjs';
 const now=Date.parse('2026-10-17T12:00:00Z');
 test('calendar uses Jerusalem/UTC conversion and preserves date-only/unconfirmed precision',()=>{const event={status:'scheduled',date:'2026-10-20',startAt:'2026-10-20T12:30:00Z'};assert.match(formatCalendarWhen(event),/15:30.*Asia\/Jerusalem/);assert.match(formatCalendarWhen({...event,date:'2026-11-05',startAt:'2026-11-05T13:30:00Z'}),/15:30/);assert.match(formatCalendarWhen(event,'UTC'),/12:30.*UTC/);assert.match(formatCalendarWhen({...event,startAt:null}),/20 Oct 2026 · date only/);assert.match(formatCalendarWhen({status:'unconfirmed'}),/^Unconfirmed/);});
+test('all requested timezones convert an exact release time, including half-hour offsets and date rollover',()=>{
+  const event={status:'scheduled',date:'2026-11-10',startAt:'2026-11-10T13:30:00Z'},expected={
+    'Asia/Jerusalem':'10 Nov 2026, 15:30','UTC':'10 Nov 2026, 13:30','Europe/London':'10 Nov 2026, 13:30',
+    'America/New_York':'10 Nov 2026, 08:30','America/Chicago':'10 Nov 2026, 07:30','America/Los_Angeles':'10 Nov 2026, 05:30',
+    'Asia/Dubai':'10 Nov 2026, 17:30','Asia/Kolkata':'10 Nov 2026, 19:00','Asia/Singapore':'10 Nov 2026, 21:30',
+    'Asia/Hong_Kong':'10 Nov 2026, 21:30','Asia/Tokyo':'10 Nov 2026, 22:30','Australia/Sydney':'11 Nov 2026, 00:30'
+  };
+  assert.deepEqual(CALENDAR_TIME_ZONES.filter(([zone])=>zone!=='local').map(([zone])=>zone).sort(),Object.keys(expected).sort());
+  for(const [zone,when] of Object.entries(expected))assert.equal(formatCalendarWhen(event,zone),when+' · '+zone);
+});
+test('city timezone conversion follows northern and southern daylight-saving seasons',()=>{
+  const summer={status:'scheduled',date:'2026-07-01',startAt:'2026-07-01T13:30:00Z'},winter={...summer,date:'2026-11-10',startAt:'2026-11-10T13:30:00Z'};
+  for(const [zone,summerTime,winterTime] of [['Europe/London','14:30','13:30'],['America/New_York','09:30','08:30'],['America/Chicago','08:30','07:30'],['America/Los_Angeles','06:30','05:30'],['Asia/Jerusalem','16:30','15:30'],['Australia/Sydney','23:30','00:30']]){
+    assert.ok(formatCalendarWhen(summer,zone).includes(summerTime+' · '+zone),zone+' summer');assert.ok(formatCalendarWhen(winter,zone).includes(winterTime+' · '+zone),zone+' winter');
+  }
+});
+test('timezone preferences preserve supported choices and validate automatic device time safely',()=>{
+  for(const [zone] of CALENDAR_TIME_ZONES)assert.equal(calendarZonePreference(zone),zone);
+  for(const invalid of [null,undefined,'','invalid','constructor','Europe/Paris'])assert.equal(calendarZonePreference(invalid),'Asia/Jerusalem');
+  assert.equal(resolveCalendarZone('UTC'),'UTC');assert.equal(resolveCalendarZone('local','Europe/Paris'),'Europe/Paris');assert.equal(resolveCalendarZone('local','not-a-zone'),'UTC');assert.equal(resolveCalendarZone('local',''),'UTC');
+});
+test('changing timezone never shifts date-only meetings or invents dates for the roadmap',()=>{
+  for(const [zone] of CALENDAR_TIME_ZONES){
+    assert.equal(formatCalendarWhen({status:'scheduled',date:'2026-10-27',endDate:'2026-10-28',startAt:null},zone),'27 Oct 2026 – 28 Oct 2026 · date only');
+    assert.equal(formatCalendarWhen({status:'unconfirmed'},zone),'Unconfirmed · no activation date');
+  }
+});
 test('countdowns require a fresh verified exact time',()=>{const event={status:'scheduled',startAt:new Date(now+900000).toISOString()},source={status:'ok',fetchedAt:new Date(now).toISOString()};assert.equal(calendarCountdown(event,source,now),'In 15m');assert.match(calendarCountdown(event,{...source,status:'stale'},now),/unavailable/);assert.match(calendarCountdown(event,{...source,fetchedAt:new Date(now-21600001).toISOString()},now),/unavailable/);assert.equal(calendarCountdown({...event,startAt:null},source,now),'');});
 test('offline calendar retains only unexpired sources and removes past events',()=>{const data={sources:[{id:'new',status:'ok',fetchedAt:new Date(now-1000).toISOString()},{id:'old',status:'stale',fetchedAt:new Date(now-86400001).toISOString()}],events:[{id:1,sourceId:'new',date:'2026-10-18',startAt:null},{id:2,sourceId:'old',date:'2026-10-18',startAt:null},{id:3,sourceId:'new',startAt:new Date(now-1).toISOString()}],roadmap:[{sourceId:'old'},{sourceId:'new'}]};const result=retainCalendar(data,'offline',now);assert.deepEqual(result.events.map(e=>e.id),[1]);assert.equal(result.roadmap.length,1);assert.equal(result.sources[0].status,'stale');assert.equal(result.sources[0].fetchedAt,data.sources[0].fetchedAt);assert.equal(result.sources[1].status,'error');assert.equal(data.sources[0].status,'ok');});
 

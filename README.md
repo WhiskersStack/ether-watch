@@ -59,7 +59,7 @@ Saved alert rules and monitoring state live in **D1**. Chart appearance preferen
 - Filters by source, topic, or headline search; links to the original publisher rather than reproducing full articles.
 - Presents publication times, source health, and clearly identified cached results during temporary feed failures.
 - Displays upcoming macroeconomic and Ethereum events from official **BLS**, **BEA**, **Federal Reserve**, and **Ethereum** sources. When direct BLS retrieval fails, CPI scheduling can use the official **St. Louis Fed/FRED** calendar, with FRED provenance and a BLS failure warning. Only explicitly published release dates and times are used; missing CPI dates are never inferred.
-- Supports **UTC** and **Asia/Jerusalem** calendar display, with unconfirmed or undated events labeled accordingly.
+- Calendar display supports device time, UTC, Jerusalem (default), London, New York, Chicago, Los Angeles, Dubai, India (Kolkata), Singapore, Hong Kong, Tokyo and Sydney. The browser remembers the selection, and city timezones follow daylight-saving rules. Date-only meetings and unconfirmed roadmap targets retain their original precision.
 
 News categorization and chart markers provide context; they do **not** establish that a headline caused a price movement.
 

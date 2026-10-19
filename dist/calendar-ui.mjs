@@ -1,8 +1,29 @@
 const DAY=86400000,MAX_AGE=DAY,FRESH_AGE=21600000,CLOCK_SKEW=60000;
+export const CALENDAR_TIME_ZONES=Object.freeze([
+  ['Asia/Jerusalem','Jerusalem'],
+  ['local','Device timezone'],
+  ['UTC','UTC'],
+  ['Europe/London','London'],
+  ['America/New_York','New York'],
+  ['America/Chicago','Chicago'],
+  ['America/Los_Angeles','Los Angeles'],
+  ['Asia/Dubai','Dubai'],
+  ['Asia/Kolkata','India (Kolkata)'],
+  ['Asia/Singapore','Singapore'],
+  ['Asia/Hong_Kong','Hong Kong'],
+  ['Asia/Tokyo','Tokyo'],
+  ['Australia/Sydney','Sydney']
+]);
+export function calendarZonePreference(value){return CALENDAR_TIME_ZONES.some(([zone])=>zone===value)?value:'Asia/Jerusalem';}
+export function resolveCalendarZone(value,deviceZone){
+  const zone=calendarZonePreference(value);if(zone!=='local')return zone;
+  try{const local=deviceZone??new Intl.DateTimeFormat().resolvedOptions().timeZone;if(!local)return 'UTC';new Intl.DateTimeFormat('en',{timeZone:local});return local;}catch{return 'UTC';}
+}
 const hosts=new Set(['www.bls.gov','www.bea.gov','www.federalreserve.gov','blog.ethereum.org','ethereum.org','fred.stlouisfed.org']);
 export function calendarSafeLink(event){try{const url=new URL(event.url);return url.protocol==='https:'&&!url.username&&!url.password&&hosts.has(url.hostname)?url.href:null;}catch{return null;}}
 export function formatCalendarWhen(event,zone='Asia/Jerusalem'){
   if(event.status==='unconfirmed'||!event.date)return 'Unconfirmed · no activation date';
+  zone=resolveCalendarZone(zone);
   if(event.startAt&&Number.isFinite(Date.parse(event.startAt)))return new Intl.DateTimeFormat('en-GB',{timeZone:zone,dateStyle:'medium',timeStyle:'short'}).format(new Date(event.startAt))+' · '+zone;
   const date=value=>new Intl.DateTimeFormat('en-GB',{timeZone:'UTC',dateStyle:'medium'}).format(new Date(value+'T12:00:00Z'));
   return date(event.date)+(event.endDate&&event.endDate!==event.date?' – '+date(event.endDate):'')+' · date only';
@@ -29,9 +50,9 @@ export function calendarStatus(sources){
 }
 export function mountCalendar(){
   const $=id=>document.getElementById(id),state={data:null,busy:false,zone:'Asia/Jerusalem'};
-  try{if(localStorage.getItem('etherwatch-calendar-zone')==='UTC')state.zone='UTC';}catch{}
-  $('calendar-zone').value=state.zone;
+  try{state.zone=calendarZonePreference(localStorage.getItem('etherwatch-calendar-zone'));}catch{}
   const node=(tag,text,className)=>{const el=document.createElement(tag);if(text!==undefined)el.textContent=text;if(className)el.className=className;return el;};
+  $('calendar-zone').replaceChildren(...CALENDAR_TIME_ZONES.map(([zone,label])=>{const option=node('option',label);option.value=zone;return option;}));$('calendar-zone').value=state.zone;
   function render(){
     if(!state.data)return;state.data=retainCalendar(state.data);
     const data=state.data,list=$('calendar-events'),roadmap=$('calendar-roadmap');list.replaceChildren();roadmap.replaceChildren();
@@ -55,7 +76,7 @@ export function mountCalendar(){
     catch(error){state.data=retainCalendar(state.data,error.message);}
     finally{state.busy=false;$('calendar-refresh').disabled=false;$('calendar-events').setAttribute('aria-busy','false');render();}
   }
-  $('calendar-refresh').addEventListener('click',refresh);$('calendar-zone').addEventListener('change',()=>{state.zone=$('calendar-zone').value==='UTC'?'UTC':'Asia/Jerusalem';try{localStorage.setItem('etherwatch-calendar-zone',state.zone);}catch{}render();});
+  $('calendar-refresh').addEventListener('click',refresh);$('calendar-zone').addEventListener('change',()=>{state.zone=calendarZonePreference($('calendar-zone').value);try{localStorage.setItem('etherwatch-calendar-zone',state.zone);}catch{}render();});
   setInterval(()=>{if(!document.hidden)refresh();},3600000);
   setInterval(()=>{if(document.hidden||!state.data)return;const before=state.data.events?.length||0,next=retainCalendar(state.data);if(next.events.length!==before||next.roadmap.length!==(state.data.roadmap?.length||0)||next.sources.some((source,index)=>source.status!==state.data.sources[index]?.status)){state.data=next;render();return;}const sources=new Map(next.sources.map(source=>[source.id,source]));for(const event of next.events){const card=[...$('calendar-events').children].find(el=>el.dataset.calendarId===event.id);if(card)card.querySelector('.calendar-countdown').textContent=calendarCountdown(event,sources.get(event.sourceId));}},60000);
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});refresh();return {refresh};
