@@ -117,7 +117,7 @@ This embeds the editable frontend sources and Worker modules into `dist/server/i
 
 ```bash
 node check.cjs
-node --test chart.test.mjs news.test.mjs market-data.test.mjs calendar.test.mjs calendar-ui.test.mjs rules.test.mjs worker.test.mjs ui-state.test.cjs data-accuracy.test.cjs background-helper.test.cjs volume.test.mjs
+node --test chart.test.mjs news.test.mjs market-data.test.mjs calendar.test.mjs calendar-ui.test.mjs rules.test.mjs worker.test.mjs ui-state.test.cjs data-accuracy.test.cjs background-helper.test.cjs volume.test.mjs notifications.test.mjs
 ```
 
 Tests cover chart calculations, market-data validation and freshness, volume parsing/cache behavior, news/calendar parsing and provenance, alert evaluation, Worker endpoints, background-helper restrictions, and UI state. They use controlled fixtures rather than modifying production settings. The version 13 baseline passed 207 tests; this is a historical result, not the test count for a later release.
@@ -154,7 +154,8 @@ UPGRADE-INSTRUCTIONS.md Upgrade and release history
 
 **Unattended monitoring is not currently active.** The scheduled Codex checker is **paused**, and Site background checking is **disabled**. These settings should not be enabled as a side effect of deploying code or changing the README.
 
-- Browser notifications require browser permission and an **open, connected page**.
+- Browser notifications require browser permission and an **open, connected page**. Android delivery uses an active notification service worker; desktop browsers without service-worker support retain the page API fallback. The service worker does not poll, cache pages, subscribe to push, or enable monitoring.
+- **Test notification** is a local device check available before owner setup. It requests permission only when tapped, sends a clearly labeled test, and makes no monitor API calls or history entries. Browser acceptance must still be confirmed in the physical device notification shade.
 - Closed-page notifications require a separate, explicitly authorized and functioning monitor; the Worker/D1 code alone does not schedule one.
 - Polling may miss a brief crossing that occurs between samples.
 - An event marked as acknowledged/reported is not proof that a device notification was delivered or read.
@@ -165,7 +166,7 @@ See [MONITOR-RUNBOOK.md](MONITOR-RUNBOOK.md) for operational details.
 
 ## Project direction
 
-Ether Watch remains a work in progress. The current accuracy release builds on the public version 13 baseline. Verify CoinMarketCap and CPI retrieval from the hosted Worker before declaring those sources operational. Owner/service verification, real notification delivery, physical-device touch QA, and GitHub synchronization remain later work. Keep monitor writes restricted and monitoring activation explicit.
+Ether Watch remains a work in progress. The current accuracy release builds on the public version 13 baseline. Verify CoinMarketCap and CPI retrieval from the hosted Worker before declaring those sources operational. Owner/service provisioning, successful authorized production flows, Codex notification delivery and physical-device confirmation remain open. GitHub synchronization is handled by the owner. Keep monitor writes restricted and monitoring activation explicit.
 
 ---
 

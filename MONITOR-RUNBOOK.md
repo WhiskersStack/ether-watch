@@ -37,7 +37,11 @@ Settings changes intentionally cancel pending signals for older settings. Do not
 
 The configured interval is recorded in the Site background status after the heartbeat is created. A local Codex heartbeat requires an available Codex app, online awake machine, authorized Site access and a reachable data feed. Sampling may miss a breach that reverses between runs. No continuous monitoring or exactly-once external notification guarantee is made.
 
-Production owner/service provisioning and authorized check/acknowledgement flows remain unverified, as does actual device-notification delivery. A browser/fixture test or successful deployment does not establish those capabilities. Physical-device touch QA and GitHub synchronization are also outstanding. Keep monitoring disabled until the separate authorized activation and verification are complete.
+19 October 2026 verification: both public domains passed 20 live denial checks in total. Anonymous writes, invalid service credentials and cross-origin writes were rejected; caller-supplied identity headers were stripped. Saved rules, event/decision history and background status were unchanged. Runtime key-name inspection and the owner confirmed that `MONITOR_OWNER_ID` and `MONITOR_SERVICE_TOKEN` are not configured. Successful authorized production check/acknowledgement flows remain unverified.
+
+The local **Test notification** control is available without monitor ownership because it requests permission and sends a generic test only to that browser. It makes no monitor API calls, evaluates no rules, changes no settings and creates no alert history. Android delivery uses a notification service worker with no fetch, polling, push or caching handlers. This does not activate browser rule checks, the Codex automation or Site background checking.
+
+The intended physical device is a Samsung Galaxy S24+. Its notification shade and touch behavior require owner confirmation in a regular browser; a fixture, embedded browser or successful deployment is not proof of physical delivery. Browser delivery and Codex report/OS delivery are separate checks. Production owner/service provisioning, secure unattended credential retrieval and actual Codex notification delivery remain unverified. GitHub synchronization is handled by the owner. Keep monitoring disabled until the separate authorized activation and verification are complete.
 
 ## Market-data operations
 

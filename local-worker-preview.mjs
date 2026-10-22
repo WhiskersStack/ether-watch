@@ -3,7 +3,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import {DatabaseSync} from 'node:sqlite';
 const root=new URL('./',import.meta.url),assets={};
-for(const [url,file,type] of [['/','index.html','text/html'],['/style.css','style.css','text/css'],['/app.js','app.js','text/javascript'],['/rules.mjs','rules.mjs','text/javascript'],['/chart.mjs','chart.mjs','text/javascript'],['/market-data.mjs','market-data.mjs','text/javascript']])assets[url]={body:fs.readFileSync(new URL('dist/'+file,root),'utf8'),type};
+for(const [url,file,type] of [['/','index.html','text/html'],['/style.css','style.css','text/css'],['/app.js','app.js','text/javascript'],['/rules.mjs','rules.mjs','text/javascript'],['/chart.mjs','chart.mjs','text/javascript'],['/market-data.mjs','market-data.mjs','text/javascript'],['/notifications.mjs','notifications.mjs','text/javascript'],['/notification-worker.js','notification-worker.js','text/javascript']])assets[url]={body:fs.readFileSync(new URL('dist/'+file,root),'utf8'),type};
 const engine=fs.readFileSync(new URL('dist/rules.mjs',root),'utf8').replace(/^export\s+/gm,'');
 const source=fs.readFileSync(new URL('worker/index.js',root),'utf8');
 const news=fs.readFileSync(new URL('worker/news.js',root),'utf8').replace(/^export\s+/gm,'');

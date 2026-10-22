@@ -85,3 +85,8 @@ input::placeholder{color:var(--muted);opacity:1}
 @media(max-width:850px){.theme-control{margin:0 0 0 auto;gap:4px;width:120px;flex-shrink:0}aside{gap:12px}.theme-control select{padding:7px 9px}}
 @media(max-width:380px){aside{gap:8px}.brand{font-size:18px;white-space:nowrap}.mark{font-size:25px;margin-right:5px}.theme-control{width:104px}}
 @media(max-width:360px){.metrics{grid-template-columns:minmax(0,1fr)}}
+
+.alert-settings{flex-wrap:wrap}.alert-settings .notification-actions{display:flex;flex-wrap:wrap;gap:8px;max-width:100%}.notification-actions button{min-height:44px}
+
+/* Direct chart zoom controls for touch screens and keyboard users. */
+.chart-zoom{display:flex;gap:6px}.chart-zoom button{min-height:44px;min-width:44px}
