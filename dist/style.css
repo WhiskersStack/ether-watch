@@ -90,3 +90,5 @@ input::placeholder{color:var(--muted);opacity:1}
 
 /* Direct chart zoom controls for touch screens and keyboard users. */
 .chart-zoom{display:flex;gap:6px}.chart-zoom button{min-height:44px;min-width:44px}
+
+.background-controls{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}.background-controls button{min-height:44px}

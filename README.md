@@ -8,7 +8,7 @@ Ether Watch is a responsive ETH/USD dashboard that combines live market data, in
 
 [Live application](https://etherwatch.app) · [Source code](https://github.com/WhiskersStack/ether-watch)
 
-> The dashboard is public. Monitor writes require the configured signed-in owner or a restricted application service credential. See `MONITOR-RUNBOOK.md` for manual runtime provisioning; writes fail closed without it. The existing scheduled monitor remains paused.
+> The dashboard is public. Monitor writes require the configured signed-in owner or a restricted application service credential. Owner and service credentials are provisioned; see `MONITOR-RUNBOOK.md` for the account-encrypted local checker and remaining delivery checks. The owner activated the existing five-minute local monitor on 22 October 2026; its first live check succeeded.
 
 ## What it does
 
@@ -117,7 +117,7 @@ This embeds the editable frontend sources and Worker modules into `dist/server/i
 
 ```bash
 node check.cjs
-node --test chart.test.mjs news.test.mjs market-data.test.mjs calendar.test.mjs calendar-ui.test.mjs rules.test.mjs worker.test.mjs ui-state.test.cjs data-accuracy.test.cjs background-helper.test.cjs volume.test.mjs notifications.test.mjs
+node --test chart.test.mjs news.test.mjs market-data.test.mjs calendar.test.mjs calendar-ui.test.mjs rules.test.mjs worker.test.mjs ui-state.test.cjs data-accuracy.test.cjs background-helper.test.cjs volume.test.mjs notifications.test.mjs monitor-service.test.cjs
 ```
 
 Tests cover chart calculations, market-data validation and freshness, volume parsing/cache behavior, news/calendar parsing and provenance, alert evaluation, Worker endpoints, background-helper restrictions, and UI state. They use controlled fixtures rather than modifying production settings. The version 13 baseline passed 207 tests; this is a historical result, not the test count for a later release.
@@ -160,13 +160,13 @@ UPGRADE-INSTRUCTIONS.md Upgrade and release history
 - Polling may miss a brief crossing that occurs between samples.
 - An event marked as acknowledged/reported is not proof that a device notification was delivered or read.
 - Market, news, and calendar sources may fail or temporarily become unavailable; the UI surfaces those conditions.
-- Production owner/service provisioning, authorized monitor flows, and actual device-notification delivery remain unverified. Physical-device touch testing is also outstanding; desktop/mobile browser checks do not replace it.
+- Owner access, service permission boundaries and Windows DPAPI credential recovery are verified. The first enabled service check and historical-alert report/acknowledgement succeeded. A naturally occurring new scheduled alert and actual device-notification delivery remain unverified. Physical-device touch testing is also outstanding; desktop/mobile browser checks do not replace it.
 
 See [MONITOR-RUNBOOK.md](MONITOR-RUNBOOK.md) for operational details.
 
 ## Project direction
 
-Ether Watch remains a work in progress. The current accuracy release builds on the public version 13 baseline. Verify CoinMarketCap and CPI retrieval from the hosted Worker before declaring those sources operational. Owner/service provisioning, successful authorized production flows, Codex notification delivery and physical-device confirmation remain open. GitHub synchronization is handled by the owner. Keep monitor writes restricted and monitoring activation explicit.
+Ether Watch remains a work in progress. The current accuracy release builds on the public version 13 baseline. Verify CoinMarketCap and CPI retrieval from the hosted Worker before declaring those sources operational. Owner/service provisioning is complete. The first enabled service check and historical-alert acknowledgement are verified. Naturally occurring scheduled alert delivery, OS notification delivery and physical-device confirmation remain open. GitHub synchronization is handled by the owner. Keep monitor writes restricted and monitoring activation explicit.
 
 ---
 

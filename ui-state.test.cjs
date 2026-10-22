@@ -186,3 +186,24 @@ test('decisions remain separate from alerts and never trigger browser notificati
   ctx.showMonitor({events:[],decisions:[{id:'decision',message:'Cooldown suppression',time:Date.now(),rule:'S1',kind:'breach',reason:'cooldown'}]},true);
   assert.equal(ctx.state.events.length,0);assert.equal(ctx.state.decisions.length,1);assert.equal(toasts,0);
 });
+
+test('scheduled-check control requires a ready owner and reflects confirmed state',()=>{
+ const elements={},ctx=vm.createContext({Date,state:{serverReady:true,canManage:false,canCheck:false,price:null,background:{enabled:false,intervalMinutes:5},lastCheck:0},config:{armed:true},$:id=>elements[id]??={}});
+ vm.runInContext(extract('function renderMonitorStrip()','async function checkAlert()'),ctx);ctx.renderMonitorStrip();assert.equal(elements['background-toggle'].disabled,true);
+ ctx.state.canManage=true;ctx.renderMonitorStrip();assert.equal(elements['background-toggle'].disabled,false);assert.equal(elements['background-toggle'].textContent,'Enable scheduled checks');
+ ctx.state.backgroundBusy=true;ctx.renderMonitorStrip();assert.equal(elements['background-toggle'].disabled,true);
+ ctx.state.backgroundBusy=false;ctx.state.background.enabled=true;ctx.renderMonitorStrip();assert.equal(elements['background-toggle'].textContent,'Pause scheduled checks');assert.equal(elements['background-toggle'].ariaPressed,'true');
+});
+test('public viewers cannot request a background-setting write',async()=>{
+ const forbidden=()=>{throw Error('No effects allowed');},ctx=vm.createContext({state:{serverReady:true,canManage:false,background:{enabled:false,intervalMinutes:5}},api:forbidden,showMonitor:forbidden,renderMonitorStrip:forbidden,$:forbidden});
+ vm.runInContext(extract('async function toggleBackgroundMonitoring()','function renderMonitorStrip()'),ctx);await ctx.toggleBackgroundMonitoring();
+});
+test('owner background toggle waits for confirmation and prevents overlapping writes',async()=>{
+ let finish;const elements={},calls=[],s={serverReady:true,canManage:true,background:{enabled:false,intervalMinutes:15}},ctx=vm.createContext({state:s,$:id=>elements[id]??={},renderMonitorStrip(){},showMonitor(data){s.background=data.background;},api:async(route,body)=>{calls.push({route,body});return await new Promise(resolve=>finish=resolve);}});
+ vm.runInContext(extract('async function toggleBackgroundMonitoring()','function renderMonitorStrip()'),ctx);const running=ctx.toggleBackgroundMonitoring();await ctx.toggleBackgroundMonitoring();assert.equal(calls.length,1);assert.equal(calls[0].route,'background');assert.equal(calls[0].body.intervalMinutes,15);assert.equal(calls[0].body.enabled,true);assert.equal(s.background.enabled,false);assert.equal(s.backgroundBusy,true);
+ finish({background:{enabled:true,intervalMinutes:15}});await running;assert.equal(s.background.enabled,true);assert.equal(s.backgroundBusy,false);assert.match(elements['background-feedback'].textContent,/Scheduled checks enabled/);
+});
+test('failed background write keeps its old state and restores controls',async()=>{
+ const elements={},s={serverReady:true,canManage:true,background:{enabled:false,intervalMinutes:5}},ctx=vm.createContext({state:s,$:id=>elements[id]??={},renderMonitorStrip(){},showMonitor(){throw Error('No confirmed response');},api:async()=>{throw Error('Owner session expired');}});
+ vm.runInContext(extract('async function toggleBackgroundMonitoring()','function renderMonitorStrip()'),ctx);await ctx.toggleBackgroundMonitoring();assert.equal(s.background.enabled,false);assert.equal(s.backgroundBusy,false);assert.match(elements['background-feedback'].textContent,/Could not change.*Owner session expired/);
+});
