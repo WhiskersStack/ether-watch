@@ -10,4 +10,4 @@ assert.equal(vm.runInContext('rsi(Array.from({length:40},(_,i)=>100+i))',context
 assert.equal(vm.runInContext('rsi(Array.from({length:40},(_,i)=>100-i))',context),0);
 assert.equal(vm.runInContext('ema(Array(40).fill(100),26).at(-1)',context),100);
 assert.ok(Math.abs(vm.runInContext('volumeProfile([{low:100,high:200,close:150,volume:123},{low:150,high:150,close:150,volume:27}]).volumes.reduce((a,b)=>a+b,0)',context)-150)<1e-9);
-console.log('Passed: RSI trends/flat market, EMA, and volume conservation. Alert engine checks are in rules.test.mjs.');
+console.log('Passed: RSI trends/flat market, EMA, and volume conservation.');

@@ -199,6 +199,35 @@ function fakeCanvas({ width = 700, height = 360 } = {}) {
 }
 const event = values => ({ prevented: false, preventDefault() { this.prevented = true; }, ...values });
 
+test('chart readout follows the visible candles while keeping the live ticker distinct', () => {
+  const { canvas, calls } = fakeCanvas({ width: 320, height: 410 }), summaries = [], errors = [];
+  const chart = new PriceChart(canvas, { onSummary: summary => summaries.push(summary), onError: error => errors.push(error) });
+  const data = rows(120), original = structuredClone(data);
+  chart.setOptions({ type: 'line', bars: 30, ema: true });
+  chart.setData(data, { price: 2343.42 });
+  let summary = summaries.at(-1);
+  assert.equal(summary.baseline, data[90].close);
+  assert.equal(summary.close, data[119].close);
+  assert.equal(summary.time, data[119].time);
+  assert.equal(summary.price, 2343.42);
+  assert.equal(summary.atLatest, true);
+  assert.ok(Number.isFinite(summary.ema20) && Number.isFinite(summary.ema50));
+  const live = calls.filter(call => call.key === 'fillText' && call.args[0].includes('Live $')).at(-1);
+  assert.ok(live.args[0].endsWith('Live $2,343.42'));
+  assert.ok(live.args[1] + live.args[0].length * 5 <= 320, 'live badge fits a narrow canvas');
+  chart.keyDown(event({ key: 'ArrowLeft' }));
+  summary = summaries.at(-1);
+  assert.equal(summary.baseline, data[chart.viewport.start].close);
+  assert.equal(summary.close, data[chart.viewport.end - 1].close);
+  assert.equal(summary.atLatest, false);
+  assert.equal(summary.price, 2343.42, 'panning cannot substitute a candle close for the live ticker');
+  assert.deepEqual(data, original, 'display treatment does not alter input prices');
+  chart.setData([]);
+  assert.equal(summaries.at(-1), null);
+  assert.deepEqual(errors, []);
+  chart.destroy();
+});
+
 test('theme repaint preserves loaded data, viewport, preferences, indicators, hover and news selection',t=>{
   const {canvas,listeners,calls}=fakeCanvas({height:590}),errors=[],tooltip={hidden:true,textContent:'',style:{}};
   const chart=new PriceChart(canvas,{tooltip,onError:error=>errors.push(error)});
@@ -240,7 +269,7 @@ test('clustered annotations stay separated while crowded numeric ticks are omitt
   const geometry = chart.geometry;
   const axis = calls.filter(call => call.key === 'fillText' && call.args[1] === geometry.right + 8);
   const ticks = axis.filter(call => /^[\d,.]+$/.test(call.args[0]));
-  const annotations = axis.filter(call => /^(?:[SR]\d |\$)/.test(call.args[0]));
+  const annotations = axis.filter(call => /^(?:[SR]\d |Live \$)/.test(call.args[0]));
   assert.equal(annotations.length, 7, 'all six watch levels and the current price remain labeled');
   assert.ok(ticks.length > 0 && ticks.length < 5, 'unobstructed ticks remain visible while crowded ticks are omitted');
   const annotationYs = annotations.map(call => call.args[2]).sort((a, b) => a - b);
@@ -269,7 +298,7 @@ test('fit and pane toggles preserve the viewport and expose offscreen levels and
   assert.deepEqual(chart.viewport, viewport);
   assert.ok(chart.geometry.min > 2400 && chart.geometry.max < 3000);
   const edgeLabels = calls.filter(call => call.key === 'fillText' && /^[↑↓]/.test(call.args[0]));
-  assert.deepEqual(edgeLabels.map(call => call.args[0]).sort(), ['↑ Live $6,000', '↑ R1 $5,000', '↓ S1 $1,000'].sort());
+  assert.deepEqual(edgeLabels.map(call => call.args[0]).sort(), ['↑ Live $6,000.00', '↑ R1 $5,000', '↓ S1 $1,000'].sort());
   for (const label of edgeLabels) assert.ok(label.args[2] >= chart.geometry.top && label.args[2] <= chart.geometry.bottom + 3);
   assert.deepEqual(errors, []);
 });
@@ -327,7 +356,7 @@ test('historical views are not stretched by a new live price in the default fit 
   chart.setData(rows(), { price: 6000 });
   assert.deepEqual(chart.viewport, viewport);
   assert.equal(chart.geometry.max, maximum);
-  assert.ok(calls.some(call => call.key === 'fillText' && call.args[0] === '↑ Live $6,000'));
+  assert.ok(calls.some(call => call.key === 'fillText' && call.args[0] === '↑ Live $6,000.00'));
 });
 
 test('event updates and marker toggles preserve the viewport and focused timestamp', () => {

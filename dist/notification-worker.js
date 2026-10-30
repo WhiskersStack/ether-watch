@@ -1,14 +1,14 @@
-// Notification display/click support only: no polling, push subscription or cache.
-self.addEventListener('notificationclick',event=>{
-  event.notification.close();
-  event.waitUntil((async()=>{
-    const target=new URL('/#alerts',self.location.origin).href;
-    for(const client of await self.clients.matchAll({type:'window',includeUncontrolled:true})){
-      if(new URL(client.url).origin===self.location.origin&&typeof client.focus==='function'){
-        if(typeof client.navigate==='function')await client.navigate(target);
-        return client.focus();
-      }
-    }
-    return self.clients.openWindow(target);
-  })());
-});
+// Permanent retirement endpoint for previously installed receivers.
+// No push or notificationclick handler: this script cannot display notifications.
+self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
+self.addEventListener('activate', event => event.waitUntil((async () => {
+  await self.clients.claim();
+  try { await (await self.registration.pushManager.getSubscription())?.unsubscribe(); } catch {}
+  try {
+    await new Promise(resolve => {
+      const request = self.indexedDB.deleteDatabase('ether-watch-push-receipts');
+      request.onsuccess = request.onerror = request.onblocked = resolve;
+    });
+  } catch {}
+  await self.registration.unregister();
+})()));

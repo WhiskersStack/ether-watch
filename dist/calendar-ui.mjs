@@ -36,6 +36,15 @@ export function calendarCountdown(event,source,now=Date.now()){
   const remaining=start-now;if(remaining<=0)return 'Scheduled time reached';
   const minutes=Math.ceil(remaining/60000);return minutes>=1440?'In '+Math.floor(minutes/1440)+'d '+Math.floor(minutes%1440/60)+'h':minutes>=60?'In '+Math.floor(minutes/60)+'h '+minutes%60+'m':'In '+minutes+'m';
 }
+export function calendarDateBadge(event,zone='Asia/Jerusalem'){
+  if(event.status==='unconfirmed'||!event.date)return null;
+  const timed=event.startAt&&Number.isFinite(Date.parse(event.startAt));
+  const value=new Date(timed?event.startAt:event.date+'T12:00:00Z');
+  if(!Number.isFinite(value.getTime()))return null;
+  const parts=new Intl.DateTimeFormat('en-GB',{timeZone:timed?resolveCalendarZone(zone):'UTC',day:'2-digit',month:'short',year:'numeric'}).formatToParts(value);
+  const part=type=>parts.find(item=>item.type===type)?.value||'';
+  return {day:part('day'),month:part('month'),year:part('year')};
+}
 export function retainCalendar(data,message=null,now=Date.now()){
   const sources=(data?.sources||[]).map(source=>{const fetched=Date.parse(source.fetchedAt),invalid=source.fetchedAt&&(!Number.isFinite(fetched)||fetched>now+CLOCK_SKEW),usable=Number.isFinite(fetched)&&!invalid&&now-fetched<=MAX_AGE;return {...source,status:!usable?'error':message?'stale':source.status,error:!usable?(invalid?'Invalid schedule verification timestamp':source.fetchedAt?'Cached schedule expired':source.error||message||'Schedule unavailable'):message||source.error};});
   const usable=new Set(sources.filter(source=>source.status!=='error').map(source=>source.id));
@@ -62,13 +71,17 @@ export function mountCalendar(){
       const card=node('article',undefined,'calendar-card'),heading=node('h3'),link=node('a',event.title);link.href=url;link.target='_blank';link.rel='noopener noreferrer';heading.append(link);
       const source=sources.get(event.sourceId),when=node('p',formatCalendarWhen(event,state.zone),'calendar-when'),countdown=node('p',calendarCountdown(event,source),'calendar-countdown');
       const verified=source?.fetchedAt?' · verified '+new Date(source.fetchedAt).toLocaleString():'';
-      card.dataset.calendarId=event.id;card.append(node('span',event.status==='unconfirmed'?'UNCONFIRMED':event.kind.toUpperCase(),'tag'),heading,when,countdown,node('p',event.context,'calendar-context'),node('small',event.source+(source?.status==='stale'?' · cached':'')+verified));target.append(card);
+      const content=node('div',undefined,'calendar-content'),date=calendarDateBadge(event,state.zone);
+      if(date){const badge=node('div',undefined,'calendar-date');badge.setAttribute('aria-hidden','true');badge.append(node('span',date.month),node('strong',date.day),node('small',date.year));card.append(badge);}
+      else card.classList.add('calendar-roadmap-card');
+      card.dataset.calendarId=event.id;content.append(node('span',event.status==='unconfirmed'?'UNCONFIRMED':event.kind.toUpperCase(),'tag'),heading,when,countdown,node('p',event.context,'calendar-context'),node('small',event.source+(source?.status==='stale'?' · cached':'')+verified));card.append(content);target.append(card);
     }
     if(!list.children.length)list.append(node('p',data.sources.every(source=>source.status==='error')?'Official schedules are unavailable. Try Refresh calendar.':'No verified events in the next 30 days.','news-empty'));
-    $('calendar-roadmap-title').hidden=!roadmap.children.length;
+    $('calendar-roadmap-disclosure').hidden=!roadmap.children.length;
     const health=$('calendar-sources'),opened=new Set([...health.querySelectorAll('details[open]')].map(el=>el.dataset.source));health.replaceChildren();
     for(const source of data.sources){const details=node('details'),summary=node('summary',source.name+' · '+({ok:'Verified',stale:'Cached',error:'Unavailable'}[source.status]||'Unavailable'));details.dataset.source=source.id;details.open=opened.has(source.id);details.append(summary,node('p',[source.fetchedAt?'Last verified '+new Date(source.fetchedAt).toLocaleString():'Not yet verified',source.error,source.warning].filter(Boolean).join(' · ')));health.append(details);}
     $('calendar-status').textContent=calendarStatus(data.sources);
+    $('calendar-status').classList.toggle('stale',data.sources.some(source=>source.status!=='ok'||source.warning));
   }
   async function refresh(){
     if(state.busy||document.hidden)return;state.busy=true;$('calendar-refresh').disabled=true;$('calendar-events').setAttribute('aria-busy','true');$('calendar-status').textContent='Checking official schedules…';

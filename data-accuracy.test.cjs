@@ -30,7 +30,7 @@ test('failed ticker with successful stats preserves the price and marks 24h chan
   const price=ctx.state.price,time=ctx.state.lastSuccess;
   ctx.request=async path=>{if(path==='ticker')throw Error('Ticker unavailable');return {open:'105',volume:'30'};};await ctx.refresh();
   assert.equal(ctx.state.price,price);assert.equal(ctx.state.lastSuccess,time);assert.equal(ctx.state.tickerError,'Ticker unavailable');assert.equal(ctx.state.statsError,null);
-  assert.match(ctx.elements.change.textContent,/stale/i);assert.equal(ctx.elements.change.className,'muted');assert.match(ctx.elements.change.title,/Ticker unavailable/);
+  assert.match(ctx.elements.change.textContent,/stale/i);assert.equal(ctx.elements.change.className,'stale');assert.match(ctx.elements.change.title,/Ticker unavailable/);
 });
 test('24h change clears stale state only after both ticker and stats recover',async()=>{
   const ctx=context();ctx.request=async path=>path==='ticker'?ticker():stats;await ctx.refresh();
@@ -43,7 +43,7 @@ test('24h change clears stale state only after both ticker and stats recover',as
   assert.equal(ctx.state.tickerError,null);assert.equal(ctx.state.statsError,null);assert.doesNotMatch(ctx.elements.change.textContent,/stale/i);assert.equal(ctx.elements.connection.title,'');
 });
 test('invalid ticker responses cannot refresh old price or make 24h change fresh',async()=>{
-  const {acceptTicker}=await import('./dist/rules.mjs');
+  const {acceptTicker}=await import('./dist/quote.mjs');
   const ctx=context();ctx.acceptTicker=acceptTicker;ctx.request=async path=>path==='ticker'?ticker():stats;await ctx.refresh();
   const price=ctx.state.price,time=ctx.state.lastTicker;
   for(const invalid of [{price:'NaN',time:new Date().toISOString()},{price:'0',time:new Date().toISOString()},{price:'120',time:new Date(Date.now()-120001).toISOString()}]){
@@ -56,13 +56,13 @@ test('24h change becomes stale when either input or ticker retrieval reaches 45 
   const ctx=context();ctx.request=async path=>path==='ticker'?ticker():stats;await ctx.refresh();
   for(const key of ['lastStats','lastSuccess','lastTicker']){
     ctx.state.lastStats=ctx.state.lastSuccess=ctx.state.lastTicker=Date.now();ctx.state[key]=Date.now()-45000;ctx.renderStats();
-    assert.match(ctx.elements.change.textContent,/stale/i,key);assert.equal(ctx.elements.change.className,'muted');
+    assert.match(ctx.elements.change.textContent,/stale/i,key);assert.equal(ctx.elements.change.className,'stale');
   }
   ctx.state.lastStats=ctx.state.lastSuccess=ctx.state.lastTicker=Date.now();ctx.renderStats();assert.doesNotMatch(ctx.elements.change.textContent,/stale/i);
 });
 test('first ticker failure leaves 24h change unavailable even if stats succeeded',async()=>{
   const ctx=context();ctx.request=async path=>{if(path==='ticker')throw Error('offline');return stats;};await ctx.refresh();
-  assert.equal(ctx.state.price,null);assert.match(ctx.elements.change.textContent,/unavailable/i);assert.equal(ctx.elements.change.className,'muted');
+  assert.equal(ctx.state.price,null);assert.match(ctx.elements.change.textContent,/unavailable/i);assert.equal(ctx.elements.change.className,'stale');
 });
 test('overview indicators restart after a missing day and clear old warmup values',()=>{
   const ctx=context();ctx.state.candles=daily();ctx.indicators();assert.match(ctx.elements.momentum.textContent,/100/);
@@ -89,10 +89,54 @@ test('one completed candle cannot generate invalid sparkline coordinates',()=>{
   assert.doesNotMatch(ctx.elements.spark.d,/NaN|Infinity/);
 });
 
+test('daily sparkline labels its own period and colors its trend independently of 24h change',()=>{
+  const ctx=context();ctx.state.stats={open:100};ctx.state.price=90;
+  ctx.state.candles=daily(50);ctx.indicators();
+  assert.equal(ctx.elements.spark.class,'positive');
+  assert.equal(ctx.elements['spark-label'].textContent,'30 daily closes');
+  assert.match(ctx.elements['spark-chart']['aria-label'],/30 completed daily closing prices · up/);
+  assert.equal((ctx.elements.spark.d.match(/[ML]/g)||[]).length,30);
+  ctx.state.candles=daily(50).map((row,i)=>({...row,close:200-i}));ctx.indicators();
+  assert.equal(ctx.elements.spark.class,'negative');
+  assert.match(ctx.elements['spark-title'].textContent,/down/);
+});
+
+test('flat daily sparkline is centered, neutral and padded away from its viewport edges',()=>{
+  const ctx=context();ctx.state.candles=daily(30).map(row=>({...row,close:100}));ctx.indicators();
+  assert.equal(ctx.elements.spark.class,'');
+  const points=ctx.elements.spark.d.split(' ').map(point=>point.slice(1).split(',').map(Number));
+  assert.equal(points[0][0],3);assert.equal(points.at(-1)[0],177);
+  assert.ok(points.every(([x,y])=>Number.isFinite(x)&&y===22.5));
+  assert.match(ctx.elements['spark-chart']['aria-label'],/unchanged 0.00%/);
+  assert.equal(ctx.elements['spark-baseline'].d,'M3,22.5 L177,22.5');
+});
+
+test('daily sparkline clears old trend and describes short history after a gap',()=>{
+  const ctx=context();ctx.state.candles=daily(50);ctx.indicators();
+  ctx.state.candles=ctx.state.candles.filter((_,i)=>i!==47);ctx.indicators();
+  assert.equal(ctx.elements['spark-label'].textContent,'2 daily closes');
+  ctx.state.candles=daily(1);ctx.indicators();
+  assert.equal(ctx.elements.spark.d,'');assert.equal(ctx.elements.spark.class,'');
+  assert.equal(ctx.elements['spark-label'].textContent,'Daily trend unavailable');
+  assert.equal(ctx.elements['spark-chart']['aria-label'],'Daily trend unavailable');
+  assert.equal(ctx.elements['spark-baseline'].d,'');
+  assert.equal(ctx.elements['spark-baseline-label'].hidden,true);
+});
+
+test('sparkline baseline tracks the first close on the same scale for rising and falling history',()=>{
+  const ctx=context();
+  for(const [closes,y] of [[[100,200],40],[[200,100],5],[[150,200,100],22.5]]){
+    ctx.renderSparkline(closes);
+    assert.equal(ctx.elements['spark-baseline'].d,'M3,'+y+' L177,'+y);
+    assert.equal(ctx.elements['spark-baseline-label'].hidden,false);
+    assert.match(ctx.elements['spark-chart']['aria-label'],/dashed baseline marks the first close/);
+  }
+});
+
 const aggregate=()=>({asset:'ETH',currency:'USD',scope:'aggregate',source:'CoinMarketCap',sourceId:'coinmarketcap',sourceUrl:'https://coinmarketcap.com/currencies/ethereum/',volumeUsd:15.52e9,sourceUpdatedAt:new Date().toISOString(),fetchedAt:new Date().toISOString(),stale:false,error:null});
 test('headline uses CoinMarketCap aggregate dollars independently of Coinbase price and stats',async()=>{
   const ctx=context();ctx.api=async()=>aggregate();await ctx.refreshVolume();assert.equal(ctx.elements.volume.textContent,'$15.52B');
-  assert.equal(ctx.elements['volume-note'].textContent,'ETH spot volume · rolling 24h · USD');assert.equal(ctx.elements['volume-source'].textContent,'CoinMarketCap');
+  assert.equal(ctx.elements['volume-note'].textContent,'USD · rolling 24h');assert.equal(ctx.elements['volume-source'].textContent,'CoinMarketCap');
   assert.match(ctx.elements['volume-updated'].textContent,/^Provider updated /);assert.match(ctx.elements['volume-freshness'].textContent,/^Fetched /);
   ctx.state.price=1;ctx.state.stats={open:1,volume:900000};ctx.state.lastStats=Date.now();ctx.renderStats();assert.equal(ctx.elements.volume.textContent,'$15.52B');
   ctx.state.statsError='offline';ctx.renderStats();assert.doesNotMatch(ctx.elements['volume-note'].textContent,/stale/i);

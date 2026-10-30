@@ -15,6 +15,20 @@
       "when": 1792385029070,
       "tag": "0001_market_data_cache",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792663200000,
+      "tag": "0002_push_subscriptions",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1793300000000,
+      "tag": "0003_dashboard_settings",
+      "breakpoints": true
     }
   ]
 }

@@ -66,7 +66,7 @@ test('missing DB or migration never starts an uncontrolled upstream request',asy
   const {db,sqlite}=database(false);let calls=0;const deps={now:start,fetch:async()=>{calls++;throw Error('must not fetch');}};try{for(const DB of [undefined,db])assert.equal((await fetchVolume(request(),{DB,CMC_API_KEY:'fixture-key'},deps)).status,503);assert.equal(calls,0);}finally{sqlite.close();}
 });
 test('volume route is public with its cache and rejects writes before storage or network',async()=>{
-  const chunks=['dist/rules.mjs','worker/news.js','worker/calendar.js','worker/volume.js'].map(file=>readFileSync(new URL(file,import.meta.url),'utf8').replace(/^export\s+/gm,''));
+  const chunks=['dist/settings.mjs','worker/news.js','worker/calendar.js','worker/volume.js'].map(file=>readFileSync(new URL(file,import.meta.url),'utf8').replace(/^export\s+/gm,''));
   const worker=(await import('data:text/javascript;base64,'+Buffer.from('const ASSETS={};\n'+chunks.join('\n')+'\n'+readFileSync(new URL('./worker/index.js',import.meta.url),'utf8')).toString('base64'))).default;
   const {db,sqlite}=database(),original=globalThis.fetch;let calls=0;globalThis.fetch=async()=>{calls++;return Response.json(payload(Date.now()));};
   try{const env={DB:db,CMC_API_KEY:'fixture-key'};const response=await worker.fetch(request(),env);assert.equal(response.status,200);assert.equal((await response.json()).source,'CoinMarketCap');const post=await worker.fetch(request('https://etherwatch.app','POST'),{});assert.equal(post.status,405);assert.equal(post.headers.get('Allow'),'GET');assert.equal(calls,1);}finally{sqlite.close();globalThis.fetch=original;}

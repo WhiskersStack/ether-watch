@@ -73,6 +73,28 @@ export function groupChartEvents(events, candles, granularity = DAY) {
   return [...groups.values()].sort((a, b) => a.index - b.index);
 }
 
+// Screen-space bins preserve every headline without squeezing touch targets together.
+export function clusterChartEvents(groups, x, left, right, minimumWidth = 44) {
+  if (!groups.length || right <= left) return [];
+  const count = Math.max(1, Math.floor((right - left) / minimumWidth));
+  const width = (right - left) / count, bins = new Map();
+  for (const group of groups) {
+    const anchor = x(group.index);
+    const bin = clamp(Math.floor((anchor - left) / width), 0, count - 1);
+    if (!bins.has(bin)) bins.set(bin, { index: group.index, endIndex: group.index, time: group.time,
+      x: left + (bin + .5) * width, minX: anchor, maxX: anchor, candleCount: 0, events: [] });
+    const cluster = bins.get(bin);
+    cluster.endIndex = group.index;
+    cluster.minX = Math.min(cluster.minX, anchor);
+    cluster.maxX = Math.max(cluster.maxX, anchor);
+    cluster.candleCount++;
+    cluster.events.push(...group.events.map(event => ({ ...event })));
+  }
+  return [...bins.values()].map(cluster => ({ ...cluster,
+    startTime: Math.min(...cluster.events.map(event => event.time)),
+    endTime: Math.max(...cluster.events.map(event => event.time)) }));
+}
+
 export function viewportBounds(length, bars = 90, end = length) {
   const total = Number.isFinite(length) ? Math.max(0, Math.floor(length)) : 0;
   if (!total) return { start: 0, end: 0, bars: 0 };
@@ -235,7 +257,7 @@ export function normalizeChartOptions(input = {}, previous = DEFAULT_CHART_OPTIO
 }
 
 export class PriceChart {
-  constructor(canvas, { tooltip = null, onProfile = () => {}, onError = () => {}, onEventSelect = () => {} } = {}) {
+  constructor(canvas, { tooltip = null, onProfile = () => {}, onSummary = () => {}, onError = () => {}, onEventSelect = () => {}, onGroupsChange = () => {} } = {}) {
     if (!canvas || typeof canvas.getContext !== 'function') throw new TypeError('A chart canvas is required.');
     this.canvas = canvas;
     this.palette = readChartPalette(canvas);
@@ -243,8 +265,12 @@ export class PriceChart {
     if (!this.context) throw new Error('Canvas rendering is unavailable.');
     this.tooltip = tooltip;
     this.onProfile = onProfile;
+    this.onSummary = onSummary;
     this.onError = onError;
     this.onEventSelect = onEventSelect;
+    this.onGroupsChange = onGroupsChange;
+    this.newsGroupSignature = '';
+    this.selectedNewsTime = null;
     this.options = { ...DEFAULT_CHART_OPTIONS };
     this.candles = [];
     this.levels = [];
@@ -377,6 +403,7 @@ export class PriceChart {
     this.viewEnd = this.candles.length;
     this.hover = null;
     this.focusedTime = null;
+    this.selectedNewsTime = null;
     this.render();
     return this;
   }
@@ -469,9 +496,7 @@ export class PriceChart {
       const press = this.markerPress, marker = this.hitNews(this.point(event));
       this.markerPress = null;
       if (!press.moved && marker?.time === press.time) {
-        this.focusedTime = marker.time;
-        this.render();
-        this.onEventSelect({ time: marker.time, events: marker.events.map(item => ({ ...item })) });
+        this.selectNewsCluster(marker.time);
       }
       return;
     }
@@ -531,6 +556,13 @@ export class PriceChart {
     if (this.destroyed) return;
     try { this.draw(); }
     catch (error) { this.geometry = null; this.newsHits = []; this.hover = null; if (this.tooltip) this.tooltip.hidden = true; this.onError(error); }
+    const groups = this.newsHits.map(({ time, startTime, endTime, candleCount, events }) =>
+      ({ time, startTime, endTime, candleCount, events: events.map(event => ({ ...event })) }));
+    const signature = JSON.stringify(groups);
+    if (signature !== this.newsGroupSignature) {
+      this.newsGroupSignature = signature;
+      this.onGroupsChange(groups);
+    }
   }
 
   draw() {
@@ -548,8 +580,11 @@ export class PriceChart {
     this.viewport = viewportBounds(this.candles.length, this.viewBars, this.viewEnd);
     this.viewEnd = this.viewport.end;
     const data = this.candles.slice(this.viewport.start, this.viewport.end);
-    if (!data.length || w < 140 || h < 120) { if (this.tooltip) this.tooltip.hidden = true; this.hover = null; this.onProfile(null); return; }
-    const left = 10, right = w - (w < 420 ? 84 : 102), top = this.options.news ? 64 : 18;
+    if (!data.length || w < 140 || h < 120) { if (this.tooltip) this.tooltip.hidden = true; this.hover = null; this.onProfile(null); this.onSummary(null); return; }
+    ctx.font = '12px DM Sans, sans-serif';
+    const liveLabel = Number.isFinite(this.price) ? 'Live ' + formatUSD(this.price) : '';
+    const axisWidth = Math.max(w < 420 ? 108 : 120, ctx.measureText(liveLabel).width + 22);
+    const left = 10, right = w - axisWidth, top = this.options.news ? 60 : 18;
     const bottom = h - (this.options.volume ? 76 : 32) - this.extraPaneHeight, volumeBottom = h - 26 - this.extraPaneHeight;
     if (bottom < top + 40) { this.hover = null; if (this.tooltip) this.tooltip.hidden = true; return; }
     const step = (right - left) / data.length, x = index => left + (index + 0.5) * step;
@@ -561,8 +596,12 @@ export class PriceChart {
     const minScale = transform(min), maxScale = transform(max);
     const y = price => top + (maxScale - transform(price)) / (maxScale - minScale) * (bottom - top);
     const valueAtY = py => inverse(maxScale - (py - top) / (bottom - top) * (maxScale - minScale));
+    const baseline = data[0].close, last = data.at(-1), lastIndex = this.viewport.end - 1;
+    this.onSummary({ baseline, close: last.close, time: last.time, price: this.price,
+      atLatest: this.viewport.end === this.candles.length, inProgress: last.time + this.granularity > Date.now() / 1000,
+      ema20: this.options.ema ? this.ema20[lastIndex] : null, ema50: this.options.ema ? this.ema50[lastIndex] : null });
     this.geometry = { left, right, top, bottom, volumeBottom, contentBottom: volumeBottom, step, x, y, valueAtY, min, max, panes: [] };
-    ctx.font = '11px DM Sans, sans-serif';
+    ctx.font = '12px DM Sans, sans-serif';
     ctx.textAlign = 'left';
     const labels = [];
     for (let index = 0; index < 5; index++) {
@@ -577,29 +616,44 @@ export class PriceChart {
     ctx.beginPath(); ctx.rect(left, top, right - left, bottom - top); ctx.clip();
     if (this.options.profile && profile?.peak > 0) {
       profile.volumes.forEach((volume, index) => {
-        const width = volume / profile.peak * (right - left) * 0.24;
-        ctx.fillStyle = index === profile.peakIndex ? palette.accent + '59' : palette.profile + '26';
+        const width = volume / profile.peak * (right - left) * 0.18;
+        ctx.fillStyle = index === profile.peakIndex ? palette.accent + '30' : palette.profile + '14';
         const py = y(profile.min + (index + 1) * profile.step);
         ctx.fillRect(right - width, py, width, Math.max(1, y(profile.min + index * profile.step) - py - 1));
       });
     }
+    const referencePrice = this.viewport.end === this.candles.length && this.price ? this.price : last.close;
+    const nearestBelow = visibleLevels.filter(level => level.price <= referencePrice).sort((a, b) => b.price - a.price)[0];
+    const nearestAbove = visibleLevels.filter(level => level.price > referencePrice).sort((a, b) => a.price - b.price)[0];
     for (const level of visibleLevels) {
       const support = level.code.startsWith('S'), py = y(level.price);
+      const nearby = level === nearestBelow || level === nearestAbove;
       const edge = py < top ? '↑ ' : py > bottom ? '↓ ' : '';
       if (!edge) {
-        ctx.strokeStyle = support ? palette.support + 'cc' : palette.resistance + 'cc';
-        ctx.setLineDash([4, 5]);
+        ctx.strokeStyle = (support ? palette.support : palette.resistance) + (nearby ? 'a6' : '4d');
+        ctx.setLineDash(nearby ? [5, 5] : [2, 6]);
         ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke();
       }
       const anchor = clamp(py, top, bottom);
-      labels.push({ desiredY: anchor, y: anchor, text: edge + level.code + ' $' + formatAxis(level.price), color: support ? palette.support : palette.resistance, kind: 'level' });
+      labels.push({ desiredY: anchor, y: anchor, text: edge + level.code + ' $' + formatAxis(level.price), color: nearby ? (support ? palette.support : palette.resistance) : palette.muted, kind: 'level' });
     }
     ctx.setLineDash([]);
     if (this.options.type === 'line') {
-      ctx.strokeStyle = palette.up; ctx.lineWidth = 1.7;
-      ctx.beginPath();
-      data.forEach((candle, index) => index ? ctx.lineTo(x(index), y(candle.close)) : ctx.moveTo(x(index), y(candle.close)));
-      ctx.stroke(); ctx.lineWidth = 1;
+      const baselineY = y(baseline);
+      ctx.strokeStyle = palette.grid; ctx.setLineDash([2, 6]);
+      ctx.beginPath(); ctx.moveTo(left, baselineY); ctx.lineTo(right, baselineY); ctx.stroke(); ctx.setLineDash([]);
+      // Clip the same unsmoothed path at the labeled baseline: every close keeps its original coordinates.
+      for (const [color, clipTop, clipBottom] of [[palette.up, top, baselineY], [palette.down, baselineY, bottom]]) {
+        ctx.save(); ctx.beginPath(); ctx.rect(left, clipTop, right - left, Math.max(0, clipBottom - clipTop)); ctx.clip();
+        ctx.beginPath(); ctx.moveTo(x(0), baselineY);
+        data.forEach((candle, index) => ctx.lineTo(x(index), y(candle.close)));
+        ctx.lineTo(x(data.length - 1), baselineY); ctx.closePath(); ctx.fillStyle = color + '0d'; ctx.fill();
+        ctx.beginPath();
+        data.forEach((candle, index) => index ? ctx.lineTo(x(index), y(candle.close)) : ctx.moveTo(x(index), y(candle.close)));
+        ctx.strokeStyle = color; ctx.lineWidth = 2.3; ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke(); ctx.restore();
+      }
+      ctx.fillStyle = last.close >= baseline ? palette.up : palette.down;
+      ctx.beginPath(); ctx.arc(x(data.length - 1), y(last.close), 3, 0, Math.PI * 2); ctx.fill();
     } else {
       data.forEach((candle, index) => {
         ctx.strokeStyle = ctx.fillStyle = candle.close >= candle.open ? palette.up : palette.down;
@@ -611,7 +665,7 @@ export class PriceChart {
     if (this.options.ema) {
       for (const [series, color] of [[this.ema20, palette.ema20], [this.ema50, palette.ema50]]) {
         let started = false;
-        ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.beginPath();
+        ctx.strokeStyle = color + 'b3'; ctx.lineWidth = 1.1; ctx.beginPath();
         series.slice(this.viewport.start, this.viewport.end).forEach((value, index) => {
           if (!Number.isFinite(value)) { started = false; return; }
           if (started) ctx.lineTo(x(index), y(value)); else { ctx.moveTo(x(index), y(value)); started = true; }
@@ -629,13 +683,13 @@ export class PriceChart {
     }
     if (this.price) {
       const py = y(this.price);
-      const edge = py < top ? '↑ Live ' : py > bottom ? '↓ Live ' : '';
+      const edge = py < top ? '↑ ' : py > bottom ? '↓ ' : '';
       if (!edge) {
-        ctx.setLineDash([2, 3]); ctx.strokeStyle = palette.text + '88';
+        ctx.setLineDash([2, 4]); ctx.strokeStyle = palette.accent + '99';
         ctx.beginPath(); ctx.moveTo(left, py); ctx.lineTo(right, py); ctx.stroke(); ctx.setLineDash([]);
       }
       const anchor = clamp(py, top, bottom);
-      labels.push({ desiredY: anchor, y: anchor, text: edge + '$' + formatAxis(this.price), color: palette.text, kind: 'price' });
+      labels.push({ desiredY: anchor, y: anchor, text: edge + liveLabel, color: palette.accent, kind: 'price' });
     }
     ctx.restore();
     if (this.options.volume) {
@@ -647,19 +701,24 @@ export class PriceChart {
       });
     }
     // Numeric ticks must stay on their gridlines; only annotations may move.
-    const labelGap = 13;
-    const annotations = layoutAxisLabels(labels.filter(label => label.kind !== 'tick'), top + 4, bottom - 3, labelGap);
+    const labelGap = 22;
+    const annotations = layoutAxisLabels(labels.filter(label => label.kind !== 'tick'), top + 12, bottom - 10, labelGap);
     const visibleTicks = labels.filter(label => label.kind === 'tick' && annotations.every(annotation => Math.abs(label.y - annotation.y) >= labelGap));
     for (const label of [...visibleTicks, ...annotations]) {
-      ctx.font = '11px DM Sans, sans-serif';
+      ctx.font = '12px DM Sans, sans-serif';
       ctx.fillStyle = label.color;
       if (label.kind !== 'tick') {
         ctx.strokeStyle = label.color + '88'; ctx.beginPath(); ctx.moveTo(right + 1, label.desiredY); ctx.lineTo(right + 5, label.y); ctx.stroke();
       }
+      if (label.kind === 'price') {
+        ctx.fillStyle = palette.accent;
+        ctx.fillRect(right + 5, label.y - 10, Math.min(w - right - 7, ctx.measureText(label.text).width + 9), 22);
+        ctx.fillStyle = palette['on-accent'];
+      }
       ctx.fillText(label.text, right + 8, label.y + 3);
     }
     this.drawIndicators(data, h - this.extraPaneHeight - 18);
-    ctx.font = '11px DM Sans, sans-serif'; ctx.fillStyle = palette.muted;
+    ctx.font = '12px DM Sans, sans-serif'; ctx.fillStyle = palette.muted;
     const timeLabels = Math.max(2, Math.min(6, Math.floor((right - left) / 110)));
     const timeStep = Math.max(1, Math.ceil(data.length / timeLabels));
     for (let index = 0; index < data.length; index += timeStep) {
@@ -677,8 +736,19 @@ export class PriceChart {
 
   hitNews(point) {
     if (!this.options.news || !this.geometry) return null;
-    return this.newsHits.filter(hit => Math.abs(hit.x - point.x) <= 14 && Math.abs(hit.y - point.y) <= 14)
+    return this.newsHits.filter(hit => Math.abs(hit.x - point.x) <= 22 && Math.abs(hit.y - point.y) <= 22)
       .sort((a, b) => Math.abs(a.x - point.x) - Math.abs(b.x - point.x))[0] || null;
+  }
+
+  selectNewsCluster(time) {
+    const marker = this.newsHits.find(hit => hit.time === time);
+    if (!marker) return;
+    this.selectedNewsTime = marker.time;
+    // A multi-candle cluster must not imply that every story belongs to one candle.
+    this.focusedTime = marker.candleCount === 1 ? marker.time : null;
+    this.render();
+    this.onEventSelect({ time: marker.time, startTime: marker.startTime, endTime: marker.endTime,
+      candleCount: marker.candleCount, events: marker.events.map(item => ({ ...item })) });
   }
 
   drawNewsRail() {
@@ -686,27 +756,24 @@ export class PriceChart {
     if (!this.options.news) return;
     const g = this.geometry, ctx = this.context;
     const groups = groupChartEvents(this.events, this.candles, this.granularity).filter(group => group.index >= this.viewport.start && group.index < this.viewport.end);
-    const positions = layoutAxisLabels(groups.map(group => ({ group, y: g.x(group.index - this.viewport.start) })), g.left + 12, g.right - 12, 28);
+    const clusters = clusterChartEvents(groups, index => g.x(index - this.viewport.start), g.left, g.right);
     ctx.save(); ctx.setLineDash([]); ctx.lineWidth = 1;
     ctx.strokeStyle = palette.grid;
     ctx.beginPath(); ctx.moveTo(g.left, g.top - 10); ctx.lineTo(g.right, g.top - 10); ctx.stroke();
-    for (const position of positions) {
-      const anchorX = g.x(position.group.index - this.viewport.start);
-      ctx.strokeStyle = palette.rsi + '99';
-      ctx.beginPath(); ctx.moveTo(position.y, 31); ctx.lineTo(anchorX, g.top - 10); ctx.stroke();
-      ctx.fillStyle = palette.rsi; ctx.beginPath(); ctx.arc(anchorX, g.top - 10, 2, 0, Math.PI * 2); ctx.fill();
-    }
     const focusedIndex = findContainingCandle(this.candles, this.focusedTime, this.granularity);
-    for (const position of positions) {
-      const group = position.group;
-      const selected = group.index === focusedIndex;
-      ctx.fillStyle = selected ? palette.accent : palette['accent-surface']; ctx.strokeStyle = palette.accent;
-      ctx.beginPath(); ctx.arc(position.y, 20, 11, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = selected ? palette['on-accent'] : palette.text; ctx.font = '11px DM Sans, sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText(group.events.length > 99 ? '99+' : String(group.events.length), position.y, 24);
-      this.newsHits.push({ ...group, x: position.y, y: 20 });
+    for (const cluster of clusters) {
+      const selected = cluster.time === this.selectedNewsTime || focusedIndex >= cluster.index && focusedIndex <= cluster.endIndex;
+      ctx.strokeStyle = selected ? palette.accent : palette.muted;
+      ctx.beginPath(); ctx.moveTo(cluster.minX, 45); ctx.lineTo(cluster.maxX, 45);
+      ctx.moveTo(cluster.minX, 42); ctx.lineTo(cluster.minX, 48);
+      ctx.moveTo(cluster.maxX, 42); ctx.lineTo(cluster.maxX, 48); ctx.stroke();
+      ctx.fillStyle = selected ? palette.accent : palette.grid;
+      ctx.beginPath(); ctx.arc(cluster.x, 20, 13, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = selected ? palette['on-accent'] : palette.text; ctx.font = '12px DM Sans, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(cluster.events.length > 99 ? '99+' : String(cluster.events.length), cluster.x, 24);
+      this.newsHits.push({ ...cluster, y: 20 });
     }
-    ctx.textAlign = 'left'; ctx.fillStyle = palette.muted; ctx.font = '11px DM Sans, sans-serif';
+    ctx.textAlign = 'left'; ctx.fillStyle = palette.muted; ctx.font = '12px DM Sans, sans-serif';
     ctx.fillText('News', g.right + 8, 24);
     ctx.restore();
   }
@@ -739,7 +806,7 @@ export class PriceChart {
       const valueAtY = py => max - (py - top) / (bottom - top) * (max - min);
       g.panes.push({ key, top, bottom, min, max, y, valueAtY });
       g.contentBottom = bottom;
-      ctx.font = '11px DM Sans, sans-serif'; ctx.fillStyle = palette.muted;
+      ctx.font = '12px DM Sans, sans-serif'; ctx.fillStyle = palette.muted;
       ctx.strokeStyle = palette.grid; ctx.setLineDash([]);
       ctx.beginPath(); ctx.moveTo(g.left, start - 4); ctx.lineTo(g.right + 70, start - 4); ctx.stroke();
       ctx.fillText((key === 'rsi' ? 'RSI 14' : 'MACD 12/26/9') + ' · ' + timeframe + ' · closed', g.left, start + 8);
@@ -786,7 +853,7 @@ export class PriceChart {
     if (this.hoveredNews !== null) {
       const marker = this.newsHits.find(hit => hit.time === this.hoveredNews);
       if (marker && this.tooltip) {
-        this.tooltip.textContent = marker.events.length + (marker.events.length === 1 ? ' headline' : ' headlines') + ' · ' + new Date(marker.time * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC\nSelect to view headlines';
+        this.tooltip.textContent = marker.events.length + (marker.events.length === 1 ? ' headline' : ' headlines') + ' · ' + new Date(marker.startTime * 1000).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' + (marker.candleCount > 1 ? '\nAcross ' + marker.candleCount + ' candles' : '') + '\nSelect to view headlines';
         this.tooltip.hidden = false;
         return;
       }
@@ -798,13 +865,13 @@ export class PriceChart {
     if (py >= g.top && py <= g.bottom) {
       ctx.beginPath(); ctx.moveTo(g.left, py); ctx.lineTo(g.right, py); ctx.stroke();
       ctx.fillStyle = palette['cursor-bg']; ctx.fillRect(g.right + 2, py - 10, this.canvas.getBoundingClientRect().width - g.right - 4, 19);
-      ctx.fillStyle = palette['cursor-text']; ctx.font = '11px DM Sans, sans-serif'; ctx.fillText(formatUSD(g.valueAtY(py)), g.right + 7, py + 3);
+      ctx.fillStyle = palette['cursor-text']; ctx.font = '12px DM Sans, sans-serif'; ctx.fillText(formatUSD(g.valueAtY(py)), g.right + 7, py + 3);
     }
     const pane = g.panes.find(candidate => py >= candidate.top && py <= candidate.bottom);
     if (pane) {
       ctx.beginPath(); ctx.moveTo(g.left, py); ctx.lineTo(g.right, py); ctx.stroke();
       ctx.fillStyle = palette['cursor-bg']; ctx.fillRect(g.right + 2, py - 10, this.canvas.getBoundingClientRect().width - g.right - 4, 19);
-      ctx.fillStyle = palette['cursor-text']; ctx.font = '11px DM Sans, sans-serif'; ctx.fillText(pane.valueAtY(py).toFixed(2), g.right + 7, py + 3);
+      ctx.fillStyle = palette['cursor-text']; ctx.font = '12px DM Sans, sans-serif'; ctx.fillText(pane.valueAtY(py).toFixed(2), g.right + 7, py + 3);
     }
     ctx.setLineDash([]);
     if (this.tooltip) {
