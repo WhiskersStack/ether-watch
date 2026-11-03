@@ -1,4 +1,6 @@
-# Local implementation validation
+# Historical local implementation validation
+
+> This records the October 30 implementation QA before later publication evidence. Its counts and pending items are not current test results or production status. See [README.md](README.md) in this directory for the later release record and the repository README for current repeatable checks.
 
 - Date: 2026-10-30. Baseline: managed Sites version 32, commit 42c49aa9c09700e8f6e401047a58a8694574b700.
 - `node --test`: 207 passed, 0 failed, 0 skipped.

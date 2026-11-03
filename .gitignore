@@ -1,3 +1,48 @@
 dist/server/
 dist/.openai/
 *.tar.gz
+
+# Dependencies
+node_modules/
+
+# Environment variables and local credentials
+.env
+.env.*
+!.env.example
+.monitor-credentials/
+.aws/
+.ssh/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+# Local SQLite / D1 data
+.wrangler/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
+# Logs, generated output and temporary files
+*.log
+npm-debug.log*
+coverage/
+.nyc_output/
+*.tar
+*.tmp
+*.temp
+*.swp
+*.swo
+.cache/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

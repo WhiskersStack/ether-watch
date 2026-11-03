@@ -1,8 +1,10 @@
-# Ether Watch cloud-alert runbook
+# Ether Watch — historical cloud-alert runbook
+
+> **Historical record; superseded by alert retirement on October 30, 2026.** Cloud monitoring, alert rules, push subscriptions, and delivery are not part of the current product. The activation, credential, subscription, and recovery steps below describe earlier releases and must not be followed as current operating instructions. No schedule state asserted below is evidence of current execution. Use [README.md](README.md) for the application and [release/README.md](release/README.md) for dated retirement/purge evidence.
 
 This runbook covers migration to hosted checks and remote Web Push, followed by recovery after cutover. Routine cloud monitoring must not depend on Codex, a local helper, or the owner's PC. Routine runs must not change rules, credentials, source, deployment, or schedules.
 
-## Current evidence and release gate
+## Historical evidence and release gate · October 2026
 
 The cloud path is deployed and the owner has confirmed a real closed-page phone notification. **The first scheduled execution succeeded at 16:26:00 Jerusalem time on 23 October 2026.** Update this status only from observed results.
 

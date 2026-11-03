@@ -1,5 +1,7 @@
 # Ether Watch backend and accuracy release
 
+> Historical release record (October 19, 2026). Monitoring and alert descriptions below are superseded by the alert-free Quantum Terminal release. See [README.md](README.md) for current behavior.
+
 The public version 13 baseline already uses the dependency-free Sites Worker and managed D1 database. The original static-to-Worker migration was deployed; it is not awaiting architecture approval. The dashboard remains public at https://etherwatch.app and https://ether-watch-jen.aquarose3.chatgpt.site/.
 
 ## Existing behavior

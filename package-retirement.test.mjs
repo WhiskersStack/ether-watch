@@ -19,5 +19,7 @@ test('packaged retired routes never inspect bindings and obsolete modules are ab
   }
   for (const file of ['rules.mjs','cloud-push.mjs']) assert.equal((await worker.fetch(new Request('https://fixture.example/' + file), {})).status, 404);
   for (const symbol of ['async function runCheck','async function cloudMcp','async function sendPush','requestPermission(']) assert.ok(!source.includes(symbol), symbol);
-  assert.deepEqual(JSON.parse(read('./dist/.openai/hosting.json')).capabilities, []);
+  const manifest = JSON.parse(read('./dist/.openai/hosting.json'));
+  assert.deepEqual(manifest, JSON.parse(read('./.openai/hosting.json')));
+  assert.deepEqual(manifest.capabilities ?? [], []);
 });

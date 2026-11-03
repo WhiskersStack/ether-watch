@@ -26,6 +26,10 @@ try {
   const goTop=async()=>{await page.evaluate(()=>window.scrollTo({top:0,behavior:'instant'}));await active('overview');};
   const nav=async name=>{if(await page.locator('#navigation-toggle').isVisible()){await page.locator('#navigation-toggle').click();}await page.getByRole('link',{name,exact:true}).click();await stable();};
   await load();await page.waitForFunction(()=>document.querySelector('#price').textContent.includes('2,510.12'));
+  assert.equal(new URL(page.url()).origin,origin);
+  assert.match(await page.title(),/Ether Watch/);
+  assert.equal(await page.locator('html').getAttribute('data-theme'),'classic');
+  assert.equal(await page.locator('main').isVisible(),true);
   assert.equal(await page.locator('#alerts').count(),0);
   assert.equal(await page.getByRole('link',{name:/Alerts/}).count(),0);
   assert.equal(await page.locator('#news-list .news-card').count(),6);
@@ -48,6 +52,21 @@ try {
   await page.locator('#level-S1').fill('2400');await page.locator('#settings-save').click();await page.waitForFunction(()=>!document.querySelector('#settings-dialog').open);assert.match(await page.locator('#level-list').textContent(),/2,400/);
   await page.reload({waitUntil:'networkidle'});assert.match(await page.locator('#level-list').textContent(),/2,400/);
   await page.locator('#settings-open').click();await page.locator('#settings-reset').click();assert.equal(await page.locator('#level-S1').inputValue(),'2416');await page.locator('#settings-cancel').click();assert.match(await page.locator('#level-list').textContent(),/2,400/);checks.push('Levels validate, save, persist and cancel reset');
+  await page.locator('#chart-type').selectOption('line');
+  await page.locator('[data-timeframe="3600"]').click();
+  await page.waitForFunction(()=>document.querySelector('#chart-interval').textContent.includes('1h'));
+  await page.locator('#chart-options-open').click();
+  for(const id of ['show-ema','show-rsi','show-macd'])await page.locator('#'+id).check();
+  await page.locator('#chart-scale').selectOption('log');await page.locator('#chart-fit').selectOption('candles');
+  await page.keyboard.press('Escape');assert.equal(await page.locator('#chart-options-dialog').evaluate(el=>el.open),false);
+  await page.locator('#chart').focus();await page.keyboard.press('+');await page.keyboard.press('ArrowLeft');await page.locator('#chart-reset').click();
+  await page.reload({waitUntil:'networkidle'});assert.equal(await page.locator('#chart-type').inputValue(),'line');
+  assert.equal(await page.locator('#chart-timeframe').inputValue(),'3600');
+  await page.locator('#chart-options-open').click();
+  for(const id of ['show-ema','show-rsi','show-macd'])assert.equal(await page.locator('#'+id).isChecked(),true);
+  assert.equal(await page.locator('#chart-scale').inputValue(),'log');await capture('chart-preferences');
+  await page.locator('#chart-options-close').click();checks.push('Chart style, interval, indicators, scale, keyboard navigation and saved preferences');
+  await page.evaluate(()=>localStorage.removeItem('etherwatch-chart'));await load();
   await load('?viewer=true');assert.equal(await page.locator('#settings-open').isDisabled(),true);assert.equal(await page.locator('#settings-signin').isVisible(),true);await capture('04-signed-out-levels');checks.push('Signed-out editing explanation');
   await page.setViewportSize({width:1024,height:1000});await load();d=await dimensions();assert.deepEqual(d.order,['news','calendar']);assert.ok(Math.abs(d.news/d.events-2)<0.1);assert.ok(d.documentWidth<=d.width);await capture('05-tablet-1024');checks.push('1024px desktop-grid boundary');
   await page.setViewportSize({width:390,height:844});await load();d=await dimensions();assert.deepEqual(d.order,['calendar','news']);assert.ok(d.documentWidth<=d.width);assert.equal(await page.locator('#news-list .news-card').count(),3);await capture('06-phone-overview');
@@ -66,6 +85,56 @@ try {
     if(scenario!=='loading'){await nav('News');await active('news');await capture('state-'+scenario);}
     checks.push('Fixture '+scenario+' state');
   }
+  await page.setViewportSize({width:1440,height:1000});
+  const verified={levels:{S3:2200,S2:2300,S1:2400,R1:2600,R2:2700,R3:2800},revision:7,access:{canManage:true}};
+  let settingsMode='loading',pendingSettings;
+  await page.route('**/api/settings',async route=>{
+    assert.equal(route.request().method(),'GET','Failure/recovery QA must never save fallback values');
+    if(settingsMode==='loading'||settingsMode==='timeout'){pendingSettings=route;return;}
+    if(settingsMode==='offline')return route.abort('internetdisconnected');
+    if(settingsMode==='failure')return route.fulfill({status:503,json:{error:'Synthetic settings failure'}});
+    return route.fulfill({json:settingsMode==='invalid'?{...verified,revision:null}:verified});
+  });
+  await page.goto(origin+'/',{waitUntil:'domcontentloaded'});
+  await page.waitForFunction(()=>document.querySelector('#level-list').children.length===6);
+  assert.equal(await page.locator('#range-support').textContent(),'—');
+  assert.match(await page.locator('#settings-status').textContent(),/Loading/);
+  assert.equal(await page.locator('#settings-open').isDisabled(),true);
+  assert.equal(await page.locator('#range-pin').isHidden(),true);
+  assert.equal(await page.locator('#chart-levels-status').isVisible(),true);
+  await page.waitForFunction(()=>document.querySelector('#price').textContent.includes('2,510.12'));
+  await capture('settings-loading');
+  settingsMode='success';await pendingSettings.fulfill({json:verified});
+  await page.waitForFunction(()=>!document.querySelector('#settings-open').disabled);
+  assert.equal(await page.locator('#range-support').textContent(),'$2,400.00');
+  assert.equal(await page.locator('#chart-levels-status').isHidden(),true);
+  checks.push('Pending settings show placeholders while market/chart load independently, then recover');
+  await page.locator('#settings-open').click();settingsMode='failure';
+  // The fixture guard disables visibility events; simulate a refresh while editing.
+  await page.evaluate(()=>document.querySelector('#refresh').click());
+  await page.waitForFunction(()=>document.querySelector('#settings-status').textContent.includes('stale'));
+  assert.equal(await page.locator('#settings-save').isDisabled(),true);assert.equal(await page.locator('#level-S1').isDisabled(),true);
+  await page.locator('#settings-cancel').click();
+  assert.equal(await page.locator('#range-support').textContent(),'$2,400.00');
+  assert.match(await page.locator('#range-note').textContent(),/Stale/);await capture('settings-stale');
+  settingsMode='success';verified.revision=8;verified.levels.S1=2420;
+  await page.locator('#refresh').click();await page.waitForFunction(()=>!document.querySelector('#settings-open').disabled);
+  assert.equal(await page.locator('#range-support').textContent(),'$2,420.00');
+  assert.equal(await page.locator('#chart-levels-status').isHidden(),true);await capture('settings-recovered');
+  checks.push('Failed settings refresh retains marked values, disables an open editor, and Refresh restores current levels');
+  for(const mode of ['failure','invalid','offline','timeout']){
+    settingsMode=mode;await page.goto(origin+'/',{waitUntil:'domcontentloaded'});
+    await page.waitForFunction(()=>document.querySelector('#settings-status').textContent.includes('unavailable'),null,{timeout:22000});
+    assert.equal(await page.locator('#range-support').textContent(),'—');
+    assert.equal(await page.locator('#settings-open').isDisabled(),true);
+    assert.equal(await page.locator('#range-pin').isHidden(),true);
+    assert.equal(await page.locator('#chart-levels-status').isVisible(),true);
+    if(mode==='failure')await capture('settings-unavailable');
+    settingsMode='success';await page.locator('#refresh').click();await page.waitForFunction(()=>!document.querySelector('#settings-open').disabled);
+    assert.equal(await page.locator('#range-support').textContent(),'$2,420.00');
+    checks.push('Settings '+mode+' renders unavailable without defaults and recovers');
+  }
+  await page.unroute('**/api/settings');
   assert.equal(errors.length,0,errors.join('\n'));assert.ok(requests.every(url=>new URL(url).origin===origin));
   assert.ok(!requests.some(url=>/\/api\/(state|config|push|check|background)/.test(url)));
   await fs.writeFile(path.join(output,'results.json'),JSON.stringify({checks,errors,warnings:[...new Set(warnings)],requests:requests.length,externalRequests:0},null,2));

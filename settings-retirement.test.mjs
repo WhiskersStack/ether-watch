@@ -71,4 +71,18 @@ test('all retired endpoints reject GET/POST before touching storage or network, 
 });
 test('settings missing storage fails without silently replacing saved levels',async()=>{assert.equal((await worker.fetch(request(),{})).status,503);});
 
+test('missing or invalid saved rows fail read-only without seeding defaults',async()=>{
+  for(const kind of ['missing','invalid']){
+    const f=fixture();try{
+      transaction(f.sqlite,migration);
+      if(kind==='missing')f.sqlite.exec('DELETE FROM dashboard_settings');
+      else f.sqlite.exec('PRAGMA ignore_check_constraints=ON; UPDATE dashboard_settings SET s1=0');
+      const before=f.sqlite.prepare('SELECT * FROM dashboard_settings').all();
+      const response=await worker.fetch(request(),f);assert.equal(response.status,503);
+      assert.equal((await response.json()).levels,undefined);
+      assert.deepEqual(f.sqlite.prepare('SELECT * FROM dashboard_settings').all(),before);
+    }finally{f.sqlite.close();}
+  }
+});
+
 test('purge refuses a missing legacy revision even after a newer owner save',()=>{const f=fixture();try{transaction(f.sqlite,migration);f.sqlite.exec("UPDATE dashboard_settings SET revision=2; UPDATE monitor SET data=json_remove(data,'$.config.revision')");assert.throws(()=>transaction(f.sqlite,purge));assert.equal(f.sqlite.prepare('SELECT count(*) AS n FROM monitor').get().n,1);}finally{f.sqlite.close();}});

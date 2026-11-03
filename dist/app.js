@@ -8,7 +8,8 @@ import { createCandleFeed } from './market-data.mjs';
 import { mountCalendar } from './calendar-ui.mjs';
 const $ = id => document.getElementById(id);
 const levelNames={R3:'Resistance 3',R2:'Resistance 2',R1:'Immediate resistance',S1:'Immediate support',S2:'Support 2',S3:'Support 3'};
-let config=structuredClone(DEFAULT_SETTINGS),levels=[];
+let config=null,levels=[];
+let settingsRequest=null;
 let editingConfig=null;
 let chartPrefs={...DEFAULT_CHART_OPTIONS,timeframe:86400,bars:90};
 try{const saved=JSON.parse(localStorage.getItem('etherwatch-chart')||'{}');for(const key of ['ema','volume','profile','levels','flips','rsi','macd','news'])if(typeof saved[key]==='boolean')chartPrefs[key]=saved[key];if(['candles','line'].includes(saved.type))chartPrefs.type=saved.type;if(['linear','log'].includes(saved.scale))chartPrefs.scale=saved.scale;if(['levels','candles'].includes(saved.fit))chartPrefs.fit=saved.fit;if([900,3600,86400].includes(saved.timeframe))chartPrefs.timeframe=saved.timeframe;if([30,90,180].includes(saved.bars))chartPrefs.bars=saved.bars;}catch{}
@@ -30,20 +31,34 @@ async function api(path,body){const response=await fetch('/api/'+path,{method:bo
 function applyConfig(next){
   config=validateSettings(next);
   levels=Object.entries(levelNames).map(([code,name])=>({code,name,price:config.levels[code]}));
-  $('range-support').textContent=usd(config.levels.S1);$('range-resistance').textContent=usd(config.levels.R1);
-  renderLevels();if(state.price)renderPosition(state.price);draw();
 }
 function showSettings(data){
-  applyConfig(data);state.serverReady=true;state.canManage=data.access?.canManage===true;renderSettingsAccess();
+  if(!Number.isSafeInteger(data?.revision)||data.revision<1)throw new Error('Saved settings revision is unavailable.');
+  applyConfig(data);state.serverReady=true;state.settingsLoading=false;state.canManage=data.access?.canManage===true;renderSettingsAccess();
 }
 function renderSettingsAccess(){
   $('settings-open').disabled=!state.serverReady||!state.canManage;
   document.querySelectorAll('[data-open-settings]').forEach(button=>{button.disabled=$('settings-open').disabled;});
+  document.querySelector('#settings-form fieldset').disabled=$('settings-open').disabled;
+  $('settings-save').disabled=$('settings-reset').disabled=$('settings-open').disabled;
   $('settings-signin').hidden=!state.serverReady||state.canManage;
-  $('settings-status').textContent=state.serverReady?(state.canManage?'Saved chart levels · editable by you':'Saved chart levels · read only'):'Saved levels unavailable. Use Refresh to retry.';
+  $('settings-status').textContent=state.serverReady?(state.canManage?'Saved chart levels · editable by you':'Saved chart levels · read only'):state.settingsLoading?(config?'Rechecking saved levels · showing last verified values.':'Loading saved levels…'):config?'Saved levels stale · showing last verified values. Use Refresh to retry.':'Saved levels unavailable. Use Refresh to retry.';
+  $('chart-levels-status').hidden=state.serverReady;
+  $('chart-levels-status').textContent=state.settingsLoading?'Level overlays paused · checking saved levels…':'Level overlays unavailable · refresh saved levels to restore.';
+  $('range-support').textContent=usd(config?.levels.S1);$('range-resistance').textContent=usd(config?.levels.R1);
+  renderLevels();renderPosition(state.price);draw();
 }
-function renderPosition(price){const support=config.levels.S1,resistance=config.levels.R1;$('range-pin').style.left=Math.max(0,Math.min(100,(price-support)/(resistance-support)*100))+'%';$('range-note').textContent=price<support?'Below immediate support':price>resistance?'Above immediate resistance':'Within immediate range';$('structure').innerHTML=`<span class="eyebrow">${price<support?'SUPPORT BREACH':price>resistance?'RESISTANCE BREACH':'INSIDE THE WATCH ZONE'}</span><h3>${price<support?'Watching '+usd(config.levels.S2):price>resistance?'Watching '+usd(config.levels.R2):'Between key levels'}</h3><p>ETH is ${Math.abs(price/support*100-100).toFixed(2)}% ${price>=support?'above':'below'} S1 and ${Math.abs(price/resistance*100-100).toFixed(2)}% ${price>=resistance?'above':'below'} R1. Saved levels define your watch zone.</p>`;}
-function renderLevels(){ $('level-list').innerHTML=levels.map(l=>`<div class="level ${l.code[0]==='S'?'support':''}"><span class="level-code">${l.code}</span><div><span class="level-name">${l.name}</span><span class="level-price">${usd(l.price)}</span></div><span class="level-distance">${state.price?((l.price/state.price-1)*100>=0?'+':'')+((l.price/state.price-1)*100).toFixed(2)+'%':'—'}</span></div>`).join(''); }
+function renderPosition(price){
+  $('range-pin').hidden=!state.serverReady||!Number.isFinite(price);
+  if(!state.serverReady||!Number.isFinite(price)){
+    const message=!state.serverReady?(state.settingsLoading?(config?'Rechecking · last verified range':'Loading saved levels…'):config?'Stale · last verified range':'Saved levels unavailable'):'Awaiting live price';
+    $('range-note').textContent=message;
+    $('structure').innerHTML=`<span class="eyebrow">SAVED PRICE LEVELS</span><h3>${message}</h3><p>Position analysis resumes when saved levels and a market price are available.</p>`;
+    return;
+  }
+  const support=config.levels.S1,resistance=config.levels.R1;$('range-pin').style.left=Math.max(0,Math.min(100,(price-support)/(resistance-support)*100))+'%';$('range-note').textContent=price<support?'Below immediate support':price>resistance?'Above immediate resistance':'Within immediate range';$('structure').innerHTML=`<span class="eyebrow">${price<support?'SUPPORT BREACH':price>resistance?'RESISTANCE BREACH':'INSIDE THE WATCH ZONE'}</span><h3>${price<support?'Watching '+usd(config.levels.S2):price>resistance?'Watching '+usd(config.levels.R2):'Between key levels'}</h3><p>ETH is ${Math.abs(price/support*100-100).toFixed(2)}% ${price>=support?'above':'below'} S1 and ${Math.abs(price/resistance*100-100).toFixed(2)}% ${price>=resistance?'above':'below'} R1. Saved levels define your watch zone.</p>`;
+}
+function renderLevels(){ $('level-list').innerHTML=Object.entries(levelNames).map(([code,name])=>({code,name,price:config?.levels[code]})).map(l=>`<div class="level ${l.code[0]==='S'?'support':''}"><span class="level-code">${l.code}</span><div><span class="level-name">${l.name}</span><span class="level-price">${usd(l.price)}</span></div><span class="level-distance">${state.serverReady&&state.price?((l.price/state.price-1)*100>=0?'+':'')+((l.price/state.price-1)*100).toFixed(2)+'%':'—'}</span></div>`).join(''); }
 function ema(values,period){const out=Array(values.length).fill(null);if(values.length<period)return out;let v=values.slice(0,period).reduce((a,b)=>a+b,0)/period;out[period-1]=v;for(let i=period;i<values.length;i++){v=values[i]*2/(period+1)+v*(1-2/(period+1));out[i]=v;}return out;}
 function rsi(values,period=14){if(values.length<=period)return null;let gain=0,loss=0;for(let i=1;i<=period;i++){const d=values[i]-values[i-1];gain+=Math.max(d,0)/period;loss+=Math.max(-d,0)/period;}for(let i=period+1;i<values.length;i++){const d=values[i]-values[i-1];gain=(gain*(period-1)+Math.max(d,0))/period;loss=(loss*(period-1)+Math.max(-d,0))/period;}return loss===0?(gain===0?50:100):100-100/(1+gain/loss);}
 function completed(){
@@ -141,7 +156,7 @@ async function refresh(){
 function feedError(message){state.tickerError=message;$('connection').textContent=state.lastSuccess?'● Stale · reconnecting':'● Feed unavailable';$('connection').style.color='var(--warning)';$('connection').title=message;$('updated').textContent=state.lastSuccess?'Last successful update '+new Date(state.lastSuccess).toLocaleTimeString():'Unable to reach Coinbase · retrying every 15s';}
 function chartError(){if(chartPrefs.timeframe===86400&&!state.candles.length){$('chart-empty').style.display='flex';$('chart-empty').innerHTML='Daily chart unavailable<small>The data feed may be blocked or temporarily unavailable.</small>';}else{$('updated').textContent+=' · Daily indicators stale';}}
 function volumeProfile(candles,bins=30){if(!candles.length)return null;const min=Math.min(...candles.map(c=>c.low)),max=Math.max(...candles.map(c=>c.high)),step=(max-min||1)/bins,volumes=Array(bins).fill(0);for(const c of candles){if(c.high===c.low){volumes[Math.min(bins-1,Math.floor((c.close-min)/step))]+=c.volume;continue;}for(let i=0;i<bins;i++){const overlap=Math.max(0,Math.min(c.high,min+(i+1)*step)-Math.max(c.low,min+i*step));volumes[i]+=c.volume*overlap/(c.high-c.low);}}const peak=Math.max(...volumes);return {min,step,volumes,peak,poc:min+(volumes.indexOf(peak)+.5)*step};}
-function draw(){try{priceChart.setData(graphState.candles,{price:state.price,levels,granularity:chartPrefs.timeframe});}catch(error){$('chart-empty').style.display='flex';$('chart-empty').textContent='Chart data unavailable · '+error.message;}}
+function draw(){try{priceChart.setData(graphState.candles,{price:state.price,levels:state.serverReady?levels:[],granularity:chartPrefs.timeframe});}catch(error){$('chart-empty').style.display='flex';$('chart-empty').textContent='Chart data unavailable · '+error.message;}}
 function renderChartReadout(summary){
   const key=JSON.stringify(summary);if(key===chartReadoutKey)return;chartReadoutKey=key;
   const money=value=>Number.isFinite(value)?usd(value):'—';
@@ -294,17 +309,24 @@ $('settings-reset').addEventListener('click',resetSettings);
 $('settings-form').addEventListener('submit',async event=>{
   event.preventDefault();const form=event.currentTarget;
   try{
+    if(!state.serverReady||!state.canManage)throw new Error('Refresh saved levels before editing.');
     const next=readSettings();for(const button of form.querySelectorAll('button'))button.disabled=true;
     showSettings(await api('settings',{levels:next.levels,expectedRevision:editingConfig.revision}));
     $('settings-dialog').close();toast('Chart levels saved.');
   }catch(error){
     $('settings-error').textContent=error.message;
     if([401,403].includes(error.status)){state.canManage=false;renderSettingsAccess();}
-  }finally{for(const button of form.querySelectorAll('button'))button.disabled=false;}
+  }finally{for(const button of form.querySelectorAll('button'))button.disabled=false;renderSettingsAccess();}
 });
-async function loadSettings(){
-  try{showSettings(await api('settings'));}
-  catch{state.serverReady=false;renderSettingsAccess();}
+function loadSettings(){
+  if(settingsRequest)return settingsRequest;
+  state.serverReady=false;state.canManage=false;state.settingsLoading=true;renderSettingsAccess();
+  settingsRequest=(async()=>{
+    try{showSettings(await api('settings'));}
+    catch{state.serverReady=false;state.canManage=false;state.settingsLoading=false;renderSettingsAccess();}
+    finally{settingsRequest=null;}
+  })();
+  return settingsRequest;
 }
 function syncFeedLayout(){
   const container=document.querySelector('.bottom-grid'),news=$('news'),calendar=$('calendar');
@@ -313,7 +335,7 @@ function syncFeedLayout(){
   newsRender();
 }
 stackedFeeds.addEventListener('change',syncFeedLayout);syncFeedLayout();
-applyConfig(config);refreshVolume();loadSettings().then(()=>Promise.all([refresh(),refreshGraph()]));
+refreshVolume();loadSettings();void Promise.all([refresh(),refreshGraph()]);
 setInterval(()=>{void Promise.all([refresh(),refreshGraph(),refreshVolume()]);},15000);
 setInterval(()=>{if(state.lastSuccess&&Date.now()-state.lastSuccess>45000)feedError('No recent successful update');renderChartFreshness();renderStats();renderVolume();renderDailyFreshness();},5000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadSettings();refresh();refreshGraph();refreshNews();refreshVolume();}});

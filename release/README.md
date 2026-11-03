@@ -1,6 +1,23 @@
 # Ether Watch alert retirement release
 
-## Current verified state — 2026-10-30
+## Stabilization review · 2026-10-31
+
+Read-only Sites metadata and GitHub checks supersede the historical snapshot below:
+
+- Current published release: **version 34**, successful deployment `appgdep_6ae4d1b32b90819180c6c4eaecd1779c`, completed 2026-10-30 17:20:41 UTC / 19:20:41 Asia/Jerusalem. Managed source: `309492b954bf47d38677cadcb53ade6ec1e78c06`; environment revision 17. Public access preserved; MCP absent; linked hourly task disabled.
+- GitHub `newTheme` remains at `27f1e05c049a7333a8f6aa8f6c07c152147fd52f`, one commit ahead of `main` (`00cd38b690db3c8972c3513699c54c33108e7488`). Local stabilization changes are uncommitted on top of that baseline.
+- Versions 33 and 34 report the same archive content hash: `sha256:070feb1a47eee0c2f720f77010443e59485907b581e53852c61edc5ad5511714`. Between their managed source commits, the relevant change is the migration-packaging correction in `build-worker.cjs`; frontend and Worker modules are unchanged.
+- Thirteen public static assets match the GitHub baseline byte for byte. Root HTML preserves the baseline document with hosting-injected Cloudflare challenge JavaScript. Managed/GitHub frontend and Worker source differences are line endings. GitHub omits the managed manifest's empty capabilities array; the local builder preserves that manifest unchanged.
+- Independent deployed Worker-binary hashing is unavailable through the connector. The retained local archives do not match the recorded archive hash, so they are not claimed as byte-identical deployment artifacts. Source comparison, metadata and public-asset evidence are distinct checks.
+- Read-only production table inventory contains `dashboard_settings`, `market_data_cache`, `monitor`, and `push_subscriptions`. Legacy tables therefore remain; permanent purge is incomplete. No private rows, runtime secrets or production API endpoints were read.
+
+The source migration journal ends at `0003_dashboard_settings`. Purge SQL `0004_purge_alerts.sql` remains only in this release directory. Its execution is not verified, and no migrations were run during stabilization. Any future purge requires a separately authorized retirement task and fresh checks.
+
+The local candidate corrects settings loading/failure/stale presentation, restores ignore protections and updates documentation. Validation: 221 Node tests passed; calculation check passed; 24 offline browser checks passed at 1440/1024/390/320px with zero page errors or external requests. The browser suite covers an actual 18-second settings timeout, failure/recovery, editor access and chart preferences. Expected fixture console messages are the unsupported CSP `navigate-to` directive and deliberately simulated 503/disconnection failures. These are candidate checks, not a deployment.
+
+The commands and authorization references below belong to the historical retirement procedure. They are not authorization to publish, run migrations, read credentials, or modify production during stabilization.
+
+## Historical verified state — 2026-10-30
 
 - Site: appgprj_6acfc8555d7c81918cdf33a9acf1fa6f, https://etherwatch.app; public access preserved.
 - Version 33 deployed successfully at 17:00:47 UTC from d9648d5d2ad1ca1b30e29c1eabd2345553577648. It contains the alert-free dashboard and retired endpoints.

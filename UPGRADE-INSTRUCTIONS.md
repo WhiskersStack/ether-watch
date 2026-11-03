@@ -1,6 +1,12 @@
 # Ether Watch upgrade instructions
 
-## Current release guidance · 2026-10-19
+## Current stabilization guidance · 2026-10-31
+
+The current source implements Quantum Terminal Blue Glass with Classic only, ETH/USD market data, Canvas charts, editable shared levels, news, and official events. Alerts and notifications are retired. Preserve the existing architecture, visual identity, owner-only level writes, and chart preferences. Local checks are documented in [README.md](README.md); deployment and purge evidence is in [release/README.md](release/README.md). Do not infer production state from the older records below. Publishing and migrations require separate authorization.
+
+**Everything below is historical release guidance.** References to active alerts, scheduling, private-only hosting, old test counts, and prior authorization apply to their original milestones, not the current product.
+
+## Historical release guidance · 2026-10-19
 
 The pre-accuracy-release baseline was **public version 13**. The dependency-free Worker/D1 backend and chart, news, calendar and alert-control upgrades are already deployed. Historical private-access, stage-gating and unpublished-migration instructions below describe earlier milestones and do not override this current guidance.
 
